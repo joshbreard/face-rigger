@@ -144,6 +144,18 @@ def separate_head_body(
             process=False,
         )
 
+        # Verify trimesh did not reorder vertices (process=False should guarantee this).
+        sliced_verts = verts[head_vert_indices]
+        max_diff = float(np.abs(np.array(head_mesh.vertices) - sliced_verts).max()) if len(head_vert_indices) > 0 else 0.0
+        log.info(
+            "Head vertex order check: head_mesh.vertices[0]=%s  verts[head_vert_indices][0]=%s  max_abs_diff=%.6e",
+            head_mesh.vertices[0].tolist() if len(head_mesh.vertices) > 0 else "N/A",
+            sliced_verts[0].tolist() if len(sliced_verts) > 0 else "N/A",
+            max_diff,
+        )
+        if max_diff > 1e-6:
+            log.warning("Vertex reordering detected! UVs indexed by head_vert_indices will be misaligned.")
+
         body_mesh = None
         if len(body_vert_indices) > 0:
             body_old_to_new = {int(old): new for new, old in enumerate(body_vert_indices)}
@@ -245,7 +257,20 @@ def _extract_gltf_head_uvs(glb_path: Path, head_name: str | None) -> np.ndarray 
         acc = orig_gltf.accessors[prim.attributes.TEXCOORD_0]
         bv = orig_gltf.bufferViews[acc.bufferView]
         byte_offset = (bv.byteOffset or 0) + (acc.byteOffset or 0)
-        raw = orig_binary[byte_offset: byte_offset + acc.count * 8]  # 2 floats * 4 bytes
+        stride = bv.byteStride or 8  # default: 2 floats packed = 8 bytes
+        if stride != 8:
+            # Interleaved buffer: de-interleave manually.
+            chunks = []
+            for i in range(acc.count):
+                start = byte_offset + i * stride
+                chunks.append(orig_binary[start: start + 8])
+            raw = b"".join(chunks)
+            log.info(
+                "Head UV de-interleave: stride=%d, count=%d for '%s'.",
+                stride, acc.count, head_name,
+            )
+        else:
+            raw = orig_binary[byte_offset: byte_offset + acc.count * 8]
         uvs = np.frombuffer(raw, dtype=np.float32).reshape(-1, 2).copy()
         log.info("Extracted %d UV verts from GLTF binary for head '%s'.", len(uvs), head_name)
         return uvs
@@ -348,7 +373,7 @@ def _render_views(glb_path: Path) -> list[bytes]:
 
 
 def _gemini_head_cutoff(view_images: list[bytes]) -> float:
-    """Ask Gemini Vision where the head ends; returns fraction from top [0.10, 0.30]."""
+    """Ask Gemini Vision where the head ends; returns fraction from top [0.15, 0.30]."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         log.info("GEMINI_API_KEY not set; using default head cutoff fraction %.2f", HEAD_Y_FRACTION)
@@ -381,6 +406,8 @@ def _gemini_head_cutoff(view_images: list[bytes]) -> float:
             "character mesh. The Y axis is the vertical axis (top = head, bottom = feet). "
             "Horizontal reference lines are drawn at 10%, 15%, 20%, 25%, and 30% from the top. "
             "At what fraction from the TOP does the head end and the neck/torso begin? "
+            "For a typical standing humanoid, the head+neck region is usually between 15% and 25% from the top. "
+            "Do not return a value below 0.15. "
             "Reply with ONLY a single decimal number."
         )
 
@@ -391,7 +418,7 @@ def _gemini_head_cutoff(view_images: list[bytes]) -> float:
             log.warning("_gemini_head_cutoff: could not parse number from response %r; using default.", raw)
             return HEAD_Y_FRACTION
         value = float(match.group())
-        clamped = max(0.10, min(0.30, value))
+        clamped = max(0.15, min(0.30, value))
         log.info("Gemini returned head cutoff %.4f (clamped to %.4f)", value, clamped)
         return clamped
 

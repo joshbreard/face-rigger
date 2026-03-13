@@ -146,6 +146,11 @@ def write_rigged_glb(
             orig_normal_count, len(hv),
         )
 
+    log.info(
+        "Head primitive UV accessor: %s (orig_uv_count=%d, head_verts=%d), normal accessor: %s",
+        a_uv, orig_uv_count, len(hv), a_norm,
+    )
+
     # ── 52 morph-target displacement accessors ───────────────────────────────
     morph_target_list: list[pygltflib.Attributes] = []
     for name in ARKIT_BLENDSHAPES:
@@ -288,15 +293,29 @@ def write_rigged_glb(
         if orig_gltf.samplers:
             gltf.samplers = orig_gltf.samplers
         if orig_gltf.images:
+            blob_before_images = len(builder.binary_blob())
             # Re-embed images into the builder so their bytes are part of the blob.
             gltf.images = _rebase_images(
                 orig_gltf, original_glb_bytes, builder, gltf
             )
+            blob_after_images = len(builder.binary_blob())
+            log.info(
+                "Image rebase: blob grew from %d B to %d B (+%d B for %d image(s)).",
+                blob_before_images, blob_after_images,
+                blob_after_images - blob_before_images,
+                len(gltf.images),
+            )
+            # bufferViews may have been copied by pygltflib at GLTF2() construction;
+            # reassign so the image bufferView entries added above are present.
+            gltf.bufferViews = builder.buffer_views
 
     # Capture binary blob AFTER all chunks (including images) have been added.
     binary_blob = builder.binary_blob()
     gltf.buffers[0].byteLength = len(binary_blob)
     gltf.set_binary_blob(binary_blob)
+    # set_binary_blob replaces bufferViews with its own internal list, discarding
+    # the image bufferView added by _rebase_images — reassign to restore it.
+    gltf.bufferViews = builder.buffer_views
 
     log.info(
         "Writing GLB -> %s  [accessors=%d  bufferViews=%d  binary=%d B  morphTargets=%d  uvs=%s  normals=%s]",
@@ -546,8 +565,7 @@ def _rebase_images(
         start = orig_bv.byteOffset or 0
         raw_img = orig_binary[start: start + orig_bv.byteLength]
 
-        # Append image bytes to builder (no target for image data).
-        new_bv_idx = builder._add_chunk(raw_img, target=None)
+        new_bv_idx = builder.add_image_bytes(raw_img)
         new_img = pygltflib.Image(
             mimeType=img.mimeType,
             bufferView=new_bv_idx,
@@ -555,6 +573,10 @@ def _rebase_images(
         if img.name:
             new_img.name = img.name
         images_out.append(new_img)
+        log.info(
+            "Rebased image '%s': %d bytes -> bufferView %d",
+            img.name or "<unnamed>", len(raw_img), new_bv_idx,
+        )
 
     return images_out
 
@@ -623,6 +645,10 @@ class _GLBBuilder:
         """Append pre-encoded bytes verbatim; return accessor index."""
         bv_idx = self._add_chunk(raw, target)
         return self._add_accessor(bv_idx, count, component_type, acc_type)
+
+    def add_image_bytes(self, raw: bytes) -> int:
+        """Append raw image bytes (no target); return bufferView index."""
+        return self._add_chunk(raw, target=None)
 
     def binary_blob(self) -> bytes:
         return b"".join(self._chunks)
