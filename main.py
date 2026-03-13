@@ -2,6 +2,9 @@ import logging
 import tempfile
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
