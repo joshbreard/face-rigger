@@ -152,6 +152,8 @@ def align_icp(
         "rmse": float(fine.inlier_rmse),
         "bbox_ratio": float(bbox_ratio),
         "scale_factor": float(scale_factor),
+        "source_centre": source_centre.tolist(),
+        "icp_transformation": fine.transformation.tolist(),
     }
     log.info("Alignment complete: %s", alignment_meta)
     return aligned_source, alignment_meta

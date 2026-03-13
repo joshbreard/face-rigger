@@ -604,13 +604,6 @@
         if (!headMesh && obj.isMesh && obj.morphTargetDictionary
             && Object.keys(obj.morphTargetDictionary).length > 0) {
           headMesh = obj;
-          // Use a standard material so we see the mesh clearly regardless of textures
-          obj.material = new THREE.MeshStandardMaterial({
-            color: 0xc8b8a8,
-            roughness: 0.65,
-            metalness: 0.05,
-          });
-          obj.material.needsUpdate = true;
         }
       });
 

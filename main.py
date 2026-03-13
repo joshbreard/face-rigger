@@ -2,6 +2,9 @@ import logging
 import tempfile
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,6 +129,11 @@ async def rig(file: UploadFile = File(...)) -> FileResponse:
                 output_path=output_path,
                 original_glb_bytes=glb_bytes,
                 original_head_name=scene_meta.get("original_head_name"),
+                head_alignment_meta=alignment_meta,
+                body_parts=scene_meta.get("body_parts"),
+                head_vert_indices=scene_meta.get("head_vert_indices"),
+                body_vert_indices=scene_meta.get("body_vert_indices"),
+                head_uvs=scene_meta.get("head_uvs"),
             )
 
         except Exception as exc:
