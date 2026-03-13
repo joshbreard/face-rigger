@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from rigger.aligner import align_icp
-from rigger.glb_writer import write_rigged_glb
+from rigger.glb_writer import patch_glb_add_morph_targets
 from rigger.separator import _find_jaw_cutoff_geometric, separate_head_body
 from rigger.transfer import (
     ARKIT_BLENDSHAPES,
@@ -217,20 +217,26 @@ async def rig(
             log.info("Transferring 52 ARKit morph targets...")
             rigged_head, blendshapes = transfer_morph_targets(aligned_head, alignment_meta)
 
-            log.info("Writing rigged GLB with pygltflib morph-target accessors...")
-            write_rigged_glb(
-                head_verts=np.array(rigged_head.vertices),
-                head_faces=np.array(rigged_head.faces),
-                blendshapes=blendshapes,
-                body_mesh=body_mesh,
-                output_path=output_path,
+            # Transform blendshape displacements from ICP-aligned space back to
+            # original model space.
+            # Forward ICP: d_icp = T_3x3 @ (scale * d_orig)
+            # Inverse:     d_orig = (1/scale) * T_3x3_inv @ d_icp
+            _scale = float(alignment_meta["scale_factor"])
+            _T = np.array(alignment_meta["icp_transformation"], dtype=np.float64)
+            _T_inv_rot = np.linalg.inv(_T[:3, :3])
+            _inv_scale = 1.0 / _scale if _scale > 1e-8 else 1.0
+            blendshapes_orig = {
+                name: (disp @ _T_inv_rot.T) * _inv_scale
+                for name, disp in blendshapes.items()
+            }
+
+            log.info("Patching original GLB with morph-target accessors (geometry unchanged)...")
+            patch_glb_add_morph_targets(
                 original_glb_bytes=glb_bytes,
+                blendshapes=blendshapes_orig,
+                output_path=output_path,
                 original_head_name=scene_meta.get("original_head_name"),
-                head_alignment_meta=alignment_meta,
-                body_parts=scene_meta.get("body_parts"),
                 head_vert_indices=scene_meta.get("head_vert_indices"),
-                body_vert_indices=scene_meta.get("body_vert_indices"),
-                head_uvs=scene_meta.get("head_uvs"),
             )
 
         except Exception as exc:
@@ -241,7 +247,7 @@ async def rig(
         log.info("=== Output validation ===")
         all_pass = True
         for name in _KEY_BLENDSHAPES:
-            delta = blendshapes.get(name, np.zeros((1, 3)))
+            delta = blendshapes_orig.get(name, np.zeros((1, 3)))
             mean_mag = float(np.linalg.norm(delta, axis=1).mean())
             if mean_mag < 0.001:
                 log.warning("VALIDATION FAIL: %s mean=%.6fm < 0.001m", name, mean_mag)

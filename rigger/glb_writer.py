@@ -29,6 +29,164 @@ from rigger.transfer import ARKIT_BLENDSHAPES
 
 log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Patch approach: keep original GLB geometry, inject morph targets only
+# ---------------------------------------------------------------------------
+
+def patch_glb_add_morph_targets(
+    original_glb_bytes: bytes,
+    blendshapes: dict[str, np.ndarray],
+    output_path: Path,
+    original_head_name: str | None = None,
+    head_vert_indices: "np.ndarray | None" = None,
+) -> None:
+    """Add 52 ARKit morph targets to the head primitive of the original GLB.
+
+    The mesh geometry (vertices, faces, UVs, normals, materials, textures) is
+    left completely unchanged.  Morph-target displacement accessors are
+    appended to the binary blob and wired into the head primitive.
+
+    Parameters
+    ----------
+    original_glb_bytes : raw bytes of the input GLB
+    blendshapes        : {name: (N_head, 3)} displacements in original model space
+    output_path        : where to save the patched GLB
+    original_head_name : GLTF mesh name used to locate the head primitive
+    head_vert_indices  : for single-merged-mesh GLBs — indices into the full
+                         vertex array that belong to the head.  Non-head
+                         vertices receive zero displacement.
+    """
+    gltf = pygltflib.GLTF2.load_from_bytes(original_glb_bytes)
+    orig_binary: bytes = gltf.binary_blob() or b""
+
+    # ── Locate the head mesh + primitive ─────────────────────────────────────
+    head_mesh_obj: "pygltflib.Mesh | None" = None
+    head_prim: "pygltflib.Primitive | None" = None
+
+    if original_head_name is not None:
+        for mesh in gltf.meshes:
+            if mesh.name and (
+                original_head_name.lower() in mesh.name.lower()
+                or mesh.name.lower() in original_head_name.lower()
+            ):
+                if mesh.primitives:
+                    head_mesh_obj = mesh
+                    head_prim = mesh.primitives[0]
+                    log.info("Head primitive found by name: '%s'", mesh.name)
+                    break
+
+    if head_prim is None:
+        # Fallback: use vertex-count proximity (or first primitive for single-mesh)
+        n_head_bs = len(next(iter(blendshapes.values()))) if blendshapes else 0
+        best_mesh = None
+        best_prim = None
+        best_diff = float("inf")
+        for mesh in gltf.meshes:
+            for prim in mesh.primitives or []:
+                if prim.attributes.POSITION is None:
+                    continue
+                acc = gltf.accessors[prim.attributes.POSITION]
+                if head_vert_indices is not None:
+                    # Single-mesh: just take the first primitive
+                    if best_prim is None:
+                        best_mesh, best_prim, best_diff = mesh, prim, 0
+                else:
+                    diff = abs(acc.count - n_head_bs)
+                    if diff < best_diff:
+                        best_diff, best_mesh, best_prim = diff, mesh, prim
+        head_mesh_obj, head_prim = best_mesh, best_prim
+        if head_prim is not None:
+            log.info(
+                "Head primitive fallback: mesh='%s', verts=%d",
+                head_mesh_obj.name if head_mesh_obj else "?",
+                gltf.accessors[head_prim.attributes.POSITION].count,
+            )
+
+    if head_prim is None or head_mesh_obj is None:
+        raise ValueError("Could not locate head primitive in original GLB.")
+
+    n_prim_verts: int = gltf.accessors[head_prim.attributes.POSITION].count
+    n_head_bs: int = len(next(iter(blendshapes.values()))) if blendshapes else 0
+
+    # ── Append morph-target displacement data after the existing binary blob ──
+    extra_chunks: list[bytes] = []
+    current_offset: int = len(orig_binary)
+    morph_target_list: list[pygltflib.Attributes] = []
+
+    for name in ARKIT_BLENDSHAPES:
+        raw = np.asarray(blendshapes.get(name, np.zeros((n_head_bs, 3))), dtype=np.float32)
+
+        if head_vert_indices is not None:
+            # Single merged mesh: scatter head displacements into full-mesh array
+            disp = np.zeros((n_prim_verts, 3), dtype=np.float32)
+            n_copy = min(len(head_vert_indices), n_prim_verts, len(raw))
+            disp[head_vert_indices[:n_copy]] = raw[:n_copy]
+        elif len(raw) != n_prim_verts:
+            log.warning(
+                "Morph target '%s': disp len=%d != prim verts=%d; padding.",
+                name, len(raw), n_prim_verts,
+            )
+            disp = np.zeros((n_prim_verts, 3), dtype=np.float32)
+            n_copy = min(len(raw), n_prim_verts)
+            disp[:n_copy] = raw[:n_copy]
+        else:
+            disp = raw
+
+        arr_bytes = disp.tobytes()
+        padded = arr_bytes + b"\x00" * ((-len(arr_bytes)) % 4)
+
+        bv_idx = len(gltf.bufferViews)
+        gltf.bufferViews.append(pygltflib.BufferView(
+            buffer=0,
+            byteOffset=current_offset,
+            byteLength=len(arr_bytes),
+            target=pygltflib.ARRAY_BUFFER,
+        ))
+        acc_idx = len(gltf.accessors)
+        gltf.accessors.append(pygltflib.Accessor(
+            bufferView=bv_idx,
+            byteOffset=0,
+            componentType=pygltflib.FLOAT,
+            count=n_prim_verts,
+            type="VEC3",
+            min=disp.min(axis=0).tolist(),
+            max=disp.max(axis=0).tolist(),
+        ))
+        extra_chunks.append(padded)
+        current_offset += len(padded)
+        morph_target_list.append(pygltflib.Attributes(POSITION=acc_idx))
+
+    # ── Patch the primitive and mesh objects ──────────────────────────────────
+    head_prim.targets = morph_target_list
+    target_names = list(ARKIT_BLENDSHAPES)
+    head_prim.extras = (head_prim.extras or {})
+    head_prim.extras["targetNames"] = target_names
+
+    head_mesh_obj.weights = [0.0] * len(ARKIT_BLENDSHAPES)
+    head_mesh_obj.extras = (head_mesh_obj.extras or {})
+    head_mesh_obj.extras["targetNames"] = target_names
+
+    # ── Write patched binary blob ─────────────────────────────────────────────
+    new_binary = orig_binary + b"".join(extra_chunks)
+    saved_buffer_views = gltf.bufferViews
+    saved_accessors = gltf.accessors
+    gltf.buffers[0].byteLength = len(new_binary)
+    gltf.set_binary_blob(new_binary)
+    # Restore lists in case set_binary_blob reset them
+    gltf.bufferViews = saved_buffer_views
+    gltf.accessors = saved_accessors
+
+    log.info(
+        "Patched GLB: head='%s' (%d verts), %d morph targets. "
+        "Binary %d → %d bytes. Saving to %s",
+        head_mesh_obj.name or "?", n_prim_verts, len(ARKIT_BLENDSHAPES),
+        len(orig_binary), len(new_binary), output_path,
+    )
+    gltf.save(str(output_path))
+    log.info("Patched GLB saved.")
+
+
 # GLTF component type constants
 _FLOAT = pygltflib.FLOAT
 _UNSIGNED_INT = pygltflib.UNSIGNED_INT
