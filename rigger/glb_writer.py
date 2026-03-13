@@ -58,6 +58,7 @@ def write_rigged_glb(
     body_parts: "list[tuple[str, trimesh.Trimesh]] | None" = None,
     head_vert_indices: "np.ndarray | None" = None,
     body_vert_indices: "np.ndarray | None" = None,
+    head_uvs: "np.ndarray | None" = None,
 ) -> None:
     """Assemble and save a GLB with 52 ARKit morph targets on the head mesh.
 
@@ -122,7 +123,11 @@ def write_rigged_glb(
     a_uv: int | None = None
     a_norm: int | None = None
 
-    if orig_uvs and orig_uv_count == len(hv):
+    if head_uvs is not None and len(head_uvs) == len(hv):
+        uv_bytes = np.asarray(head_uvs, dtype=np.float32).tobytes()
+        a_uv = builder.add_raw(uv_bytes, len(head_uvs), _FLOAT, "VEC2", pygltflib.ARRAY_BUFFER)
+        log.info("Head UVs: using pre-extracted trimesh UV array (%d verts).", len(head_uvs))
+    elif orig_uvs and orig_uv_count == len(hv):
         a_uv = builder.add_raw(orig_uvs, orig_uv_count, _FLOAT, "VEC2", pygltflib.ARRAY_BUFFER)
     elif orig_uvs:
         log.warning(

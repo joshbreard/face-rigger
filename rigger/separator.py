@@ -76,7 +76,8 @@ def separate_head_body(
         if any(kw in name.lower() for kw in HEAD_KEYWORDS):
             log.info("Keyword match -> HEAD: '%s'", name)
             named_head.append(geom)
-            head_name = name
+            if head_name is None:
+                head_name = name
         else:
             named_body_parts.append((name, geom))
 
@@ -91,6 +92,17 @@ def separate_head_body(
         )
         scene_meta["original_head_name"] = head_name
         scene_meta["body_parts"] = named_body_parts
+
+        head_uvs: np.ndarray | None = None
+        visual = getattr(head_mesh, "visual", None)
+        uv_candidate = getattr(visual, "uv", None)
+        if uv_candidate is not None and len(uv_candidate) == len(head_mesh.vertices):
+            head_uvs = np.array(uv_candidate, dtype=np.float32)
+            log.info("Captured head UVs from trimesh visual: %d verts", len(head_uvs))
+        else:
+            log.info("Head mesh has no trimesh UV data; falling back to GLTF re-extraction.")
+        scene_meta["head_uvs"] = head_uvs
+
         return head_mesh, body_mesh, scene_meta
 
     # ── Strategy 2: Gemini Vision head detection ─────────────────────────────
@@ -195,6 +207,17 @@ def separate_head_body(
         head_name,
     )
     scene_meta["original_head_name"] = head_name
+
+    head_uvs_g: np.ndarray | None = None
+    visual_g = getattr(head_mesh, "visual", None)
+    uv_candidate_g = getattr(visual_g, "uv", None)
+    if uv_candidate_g is not None and len(uv_candidate_g) == len(head_mesh.vertices):
+        head_uvs_g = np.array(uv_candidate_g, dtype=np.float32)
+        log.info("Captured head UVs from trimesh visual: %d verts", len(head_uvs_g))
+    else:
+        log.info("Head mesh has no trimesh UV data; falling back to GLTF re-extraction.")
+    scene_meta["head_uvs"] = head_uvs_g
+
     return head_mesh, body_mesh, scene_meta
 
 
