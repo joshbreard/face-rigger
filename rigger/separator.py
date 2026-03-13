@@ -5,7 +5,7 @@ Strategy
 1. Load the GLB with trimesh and inspect every mesh node.
 2. If any node name contains a HEAD_KEYWORD (case-insensitive), treat that
    mesh as the head; everything else is the body.
-3. Gemini Vision fallback: render 3 views of the model, ask Gemini to identify
+3. Gemini Vision fallback: render 2 views of the model, ask Gemini to identify
    the fraction from the top where the head ends, and use that as the Y cutoff.
 4. Last resort: if GEMINI_API_KEY is not set, use HEAD_Y_FRACTION (0.20) as
    a hardcoded fallback to pick the top 20% of the bounding box as head.
@@ -13,6 +13,7 @@ Strategy
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -260,12 +261,11 @@ def _concat(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
 
 
 def _render_views(glb_path: Path) -> list[bytes]:
-    """Render front, side, and 45-degree views using matplotlib (headless, no display required)."""
+    """Render front and side silhouette views using matplotlib (headless, no display required)."""
     import io
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3d projection
 
     try:
         scene_or_mesh = trimesh.load(str(glb_path), force="scene", process=False)
@@ -281,30 +281,61 @@ def _render_views(glb_path: Path) -> list[bytes]:
         log.warning("_render_views: failed to load GLB: %s", exc)
         return []
 
-    # Subsample for speed — Gemini only needs shape context, not full density.
-    if len(verts) > 4000:
-        idx = np.random.default_rng(0).choice(len(verts), 4000, replace=False)
-        verts = verts[idx]
-
     x, y, z = verts[:, 0], verts[:, 1], verts[:, 2]
-    s = 1  # scatter point size
+
+    y_min, y_max = float(y.min()), float(y.max())
+    y_range = y_max - y_min
+
+    # Reference fractions from the top (high Y) where lines will be drawn.
+    ref_fractions = [0.10, 0.15, 0.20, 0.25, 0.30]
 
     views = [
-        ("front", "X", "Y", x, y),
-        ("side",  "Z", "Y", z, y),
+        ("front (X-Y)", "X", "Y", x, y),
+        ("side (Z-Y)",  "Z", "Y", z, y),
     ]
 
     images: list[bytes] = []
 
-    # Front and side 2-D projections.
     for label, xlabel, ylabel, hx, hy in views:
         try:
-            fig, ax = plt.subplots(figsize=(4, 4), dpi=128)
-            ax.scatter(hx, hy, s=s, c="steelblue", linewidths=0)
-            ax.set_aspect("equal")
+            fig, ax = plt.subplots(figsize=(4, 6), dpi=128)
+
+            # Build a 2-D histogram and display it as a filled silhouette image.
+            h, xedges, yedges = np.histogram2d(hx, hy, bins=128)
+            # Transpose so Y is the vertical axis (imshow row 0 = low Y by default).
+            # We flip vertically so the top of the image corresponds to high Y (head).
+            h_img = h.T[::-1, :]
+            # Mask empty bins so background stays white.
+            h_masked = np.ma.masked_where(h_img == 0, h_img)
+            ax.imshow(
+                h_masked,
+                aspect="auto",
+                extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+                origin="lower",
+                cmap="Blues",
+                interpolation="nearest",
+            )
+
+            # Draw horizontal reference lines at 10 %, 15 %, 20 %, 25 %, 30 % from the top.
+            x_left = float(hx.min())
+            x_right = float(hx.max())
+            for frac in ref_fractions:
+                y_line = y_max - frac * y_range
+                ax.axhline(y=y_line, color="red", linewidth=1.0, linestyle="--", alpha=0.85)
+                ax.text(
+                    x_right, y_line,
+                    f" {int(frac * 100)}%",
+                    va="center", ha="left",
+                    fontsize=7, color="red",
+                    clip_on=False,
+                )
+
+            ax.set_xlim(x_left, x_right)
+            ax.set_ylim(y_min, y_max)
             ax.set_xlabel(xlabel)
             ax.set_ylabel(ylabel)
             ax.set_title(label)
+
             buf = io.BytesIO()
             fig.savefig(buf, format="png", bbox_inches="tight")
             plt.close(fig)
@@ -312,29 +343,12 @@ def _render_views(glb_path: Path) -> list[bytes]:
         except Exception as exc:
             log.warning("_render_views: %s view failed: %s", label, exc)
 
-    # 45-degree 3-D scatter.
-    try:
-        fig = plt.figure(figsize=(4, 4), dpi=128)
-        ax3d = fig.add_subplot(111, projection="3d")
-        ax3d.scatter(x, z, y, s=s, c="steelblue", linewidths=0)
-        ax3d.view_init(elev=20, azim=45)
-        ax3d.set_xlabel("X")
-        ax3d.set_ylabel("Z")
-        ax3d.set_zlabel("Y")
-        ax3d.set_title("45°")
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight")
-        plt.close(fig)
-        images.append(buf.getvalue())
-    except Exception as exc:
-        log.warning("_render_views: 3D view failed: %s", exc)
-
     log.info("_render_views: produced %d view(s) for Gemini.", len(images))
     return images
 
 
 def _gemini_head_cutoff(view_images: list[bytes]) -> float:
-    """Ask Gemini Vision where the head ends; returns fraction from top [0.05, 0.40]."""
+    """Ask Gemini Vision where the head ends; returns fraction from top [0.10, 0.30]."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         log.info("GEMINI_API_KEY not set; using default head cutoff fraction %.2f", HEAD_Y_FRACTION)
@@ -363,16 +377,21 @@ def _gemini_head_cutoff(view_images: list[bytes]) -> float:
                 }
             })
         parts.append(
-            "These images show a 3D humanoid character from different angles. "
-            "At what fraction from the TOP of the character (0.0 = very top of head, "
-            "1.0 = bottom of feet) does the head end and the neck/torso begin? "
-            "Respond with ONLY a single decimal number between 0.05 and 0.40. No text."
+            "These images show 2D projections (front and side views) of a single merged 3D humanoid "
+            "character mesh. The Y axis is the vertical axis (top = head, bottom = feet). "
+            "Horizontal reference lines are drawn at 10%, 15%, 20%, 25%, and 30% from the top. "
+            "At what fraction from the TOP does the head end and the neck/torso begin? "
+            "Reply with ONLY a single decimal number."
         )
 
         response = model.generate_content(parts)
         raw = response.text.strip()
-        value = float(raw)
-        clamped = max(0.05, min(0.40, value))
+        match = re.search(r"[-+]?\d*\.?\d+", raw)
+        if not match:
+            log.warning("_gemini_head_cutoff: could not parse number from response %r; using default.", raw)
+            return HEAD_Y_FRACTION
+        value = float(match.group())
+        clamped = max(0.10, min(0.30, value))
         log.info("Gemini returned head cutoff %.4f (clamped to %.4f)", value, clamped)
         return clamped
 

@@ -86,7 +86,10 @@ def write_rigged_glb(
     if original_glb_bytes is not None:
         try:
             orig_gltf, orig_uvs, orig_normals, orig_uv_count, orig_normal_count, orig_material_idx = \
-                _extract_head_attributes(original_glb_bytes, original_head_name, len(head_verts))
+                _extract_head_attributes(
+                    original_glb_bytes, original_head_name, len(head_verts),
+                    force_first_primitive=(head_vert_indices is not None),
+                )
             if orig_uvs:
                 log.info("Extracted UV data from original GLB (%d bytes, %d verts).", len(orig_uvs), orig_uv_count)
             if orig_normals:
@@ -317,15 +320,23 @@ def _extract_head_attributes(
     glb_bytes: bytes,
     head_name: str | None,
     expected_vert_count: int,
+    force_first_primitive: bool = False,
 ) -> tuple:
     """Extract UV/normal bytes and material index from the original GLB.
 
     Returns (orig_gltf, uv_bytes, normal_bytes, uv_count, normal_count, material_idx).
+
+    When *force_first_primitive* is True (single merged mesh case) the function
+    returns the first primitive in the file regardless of name/count, so the
+    caller can slice UVs/normals down to just the head vertices afterward.
     """
     orig_gltf = pygltflib.GLTF2.load_from_bytes(glb_bytes)
     orig_binary = orig_gltf.binary_blob()
 
-    head_prim = _find_head_primitive(orig_gltf, head_name, expected_vert_count)
+    head_prim = _find_head_primitive(
+        orig_gltf, head_name, expected_vert_count,
+        force_first_primitive=force_first_primitive,
+    )
     if head_prim is None:
         log.warning("Could not locate head primitive in original GLB for attribute extraction.")
         return orig_gltf, None, None, 0, 0, None
@@ -419,8 +430,30 @@ def _find_head_primitive(
     gltf: pygltflib.GLTF2,
     head_name: str | None,
     expected_vert_count: int,
+    force_first_primitive: bool = False,
 ) -> "pygltflib.Primitive | None":
-    """Locate the head primitive by mesh name, then fall back to vertex count."""
+    """Locate the head primitive by mesh name, then fall back to vertex count.
+
+    When *force_first_primitive* is True the function returns the first
+    primitive it finds without any name or vertex-count matching.  This is
+    correct for single-merged-mesh GLBs where the head is a vertex-level slice
+    of that one primitive; the caller holds head_vert_indices and will slice
+    UVs/normals itself.
+    """
+    # Single-merged-mesh fast path: skip matching entirely.
+    if force_first_primitive:
+        for mesh in gltf.meshes:
+            for prim in mesh.primitives or []:
+                if prim.attributes.POSITION is not None:
+                    log.info(
+                        "Head primitive: single-merged-mesh mode, using first primitive "
+                        "(mesh='%s', verts=%d); UVs/normals will be sliced by head_vert_indices.",
+                        mesh.name,
+                        gltf.accessors[prim.attributes.POSITION].count,
+                    )
+                    return prim
+        return None
+
     # Try by name first.
     if head_name is not None:
         for mesh in gltf.meshes:
