@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 
 # Meshy exports use names like "Wolf3D_Head", "Head", "Face", "Hair", etc.
 HEAD_KEYWORDS = ("wolf3d", "head", "face", "hair", "skull", "neck")
-HEAD_Y_FRACTION = 0.20  # top fraction used when Gemini is unavailable
+HEAD_Y_FRACTION = 0.28  # top fraction used when Gemini is unavailable
 
 
 def separate_head_body(
@@ -101,18 +101,29 @@ def separate_head_body(
 
         return head_mesh, body_mesh, scene_meta
 
-    # ── Strategy 2: Gemini Vision head detection ─────────────────────────────
-    log.info("No keyword matches; using Gemini Vision to determine head cutoff.")
-    cutoff_fraction = _gemini_head_cutoff(_render_views(glb_path))
-    log.info("Gemini head cutoff fraction: %.3f", cutoff_fraction)
-
+    # ── Strategy 2: geometry-based jaw/neck detection ─────────────────────────
     all_verts_arr = np.array(_concat(list(trimeshes.values())).vertices)
-    y_min_full = all_verts_arr[:, 1].min()
-    y_max_full = all_verts_arr[:, 1].max()
+    y_min_full = float(all_verts_arr[:, 1].min())
+    y_max_full = float(all_verts_arr[:, 1].max())
     total_height = y_max_full - y_min_full
-    y_cutoff = y_max_full - cutoff_fraction * total_height
+
+    y_cutoff = _find_jaw_cutoff_geometric(all_verts_arr)
+
+    if y_cutoff is not None:
+        cutoff_fraction = (y_max_full - y_cutoff) / total_height
+        log.info(
+            "Geometric jaw cutoff: Y=%.4f  fraction=%.3f from top",
+            y_cutoff, cutoff_fraction,
+        )
+    else:
+        # ── Strategy 3: Gemini Vision head detection ──────────────────────────
+        log.info("Geometric detection inconclusive; using Gemini Vision to determine jaw cutoff.")
+        cutoff_fraction = _gemini_head_cutoff(_render_views(glb_path))
+        log.info("Gemini jaw cutoff fraction: %.3f", cutoff_fraction)
+        y_cutoff = y_max_full - cutoff_fraction * total_height
+
     log.info(
-        "Full Y range [%.4f, %.4f]; head cutoff Y >= %.4f",
+        "Full Y range [%.4f, %.4f]; jaw/head cutoff Y >= %.4f",
         y_min_full, y_max_full, y_cutoff,
     )
 
@@ -285,6 +296,130 @@ def _concat(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
     return trimesh.util.concatenate(meshes)
 
 
+def _find_jaw_cutoff_geometric(verts: np.ndarray) -> float | None:
+    """Find the jaw/neck boundary using a T-pose-anchored search.
+
+    Strategy
+    --------
+    1. Measure head X width from the top 15 % of the model (skull — no arms
+       ever reach this high).
+    2. Scan downward from the head top; detect the T-pose arm branch point as
+       the first Y level where the full X span exceeds 2.5 × head_x_width.
+       Everything above that Y is arm-free: only head, neck, and shoulder
+       sockets are present.
+    3. Within the arm-free zone [T-pose Y → head top], measure the X width
+       at each slice.  The minimum X width is the neck.
+    4. Scan upward from the neck minimum.  The jaw line is where the X width
+       first increases ≥ 20 % above the neck minimum — this is where the jaw
+       bone widens out from the neck cylinder.  The nose does NOT create a
+       false trigger here because at nose-bridge Y the ears keep the X span
+       wide (>jaw width); we are looking for the *first* increase from the
+       narrow neck, which is the jaw, not the nose.
+
+    Returns an absolute Y cutoff value, or None if detection is unreliable.
+    """
+    from scipy.ndimage import uniform_filter1d
+
+    y_min = float(verts[:, 1].min())
+    y_max = float(verts[:, 1].max())
+    total_height = y_max - y_min
+    if total_height < 1e-6:
+        return None
+
+    # ── Step 1: head X width (top 15 % = skull only) ─────────────────────────
+    skull_mask = verts[:, 1] >= y_max - 0.15 * total_height
+    if skull_mask.sum() < 20:
+        log.warning("_find_jaw_cutoff_geometric: too few skull-top vertices.")
+        return None
+    head_x_width     = float(verts[skull_mask, 0].max() - verts[skull_mask, 0].min())
+    tpose_x_threshold = head_x_width * 2.5   # arm span > 2.5× head width
+
+    log.info(
+        "_find_jaw_cutoff_geometric: head_x_width=%.4f  tpose_threshold=%.4f",
+        head_x_width, tpose_x_threshold,
+    )
+
+    # ── Step 2: T-pose Y detection (scan downward) ───────────────────────────
+    band_scan = 0.02 * total_height
+    scan_levels = np.linspace(y_max, y_max - 0.70 * total_height, 200)
+    tpose_y = y_max - 0.70 * total_height   # fallback if arms not found
+
+    for y_level in scan_levels:
+        mask = (verts[:, 1] >= y_level - band_scan) & (verts[:, 1] <= y_level + band_scan)
+        if mask.sum() < 10:
+            continue
+        x_span = float(verts[mask, 0].max() - verts[mask, 0].min())
+        if x_span > tpose_x_threshold:
+            tpose_y = float(y_level)
+            break
+
+    log.info(
+        "_find_jaw_cutoff_geometric: tpose_Y=%.4f  fraction_from_top=%.3f",
+        tpose_y, (y_max - tpose_y) / total_height,
+    )
+
+    # ── Step 3: neck minimum in arm-free zone [tpose_y, head_top] ────────────
+    n_samples  = 300
+    band_half  = 0.015 * total_height
+    y_samples  = np.linspace(tpose_y, y_max - 0.02 * total_height, n_samples)
+    # y_samples[0] = tpose_y (lower), y_samples[-1] = near head top (higher)
+
+    x_widths = np.full(n_samples, np.nan)
+    for i, y_level in enumerate(y_samples):
+        mask = (verts[:, 1] >= y_level - band_half) & (verts[:, 1] <= y_level + band_half)
+        if mask.sum() < 10:
+            continue
+        x_widths[i] = float(verts[mask, 0].max() - verts[mask, 0].min())
+
+    valid = np.isfinite(x_widths)
+    if valid.sum() < 10:
+        log.warning("_find_jaw_cutoff_geometric: too few valid slices in neck search zone.")
+        return None
+
+    fill_val = float(np.nanmax(x_widths[valid]))
+    smoothed = uniform_filter1d(
+        np.where(valid, x_widths, fill_val).astype(float), size=20
+    )
+    smoothed = np.where(valid, smoothed, np.nan)
+
+    neck_idx = int(np.nanargmin(smoothed))
+    neck_x   = float(smoothed[neck_idx])
+    neck_y   = float(y_samples[neck_idx])
+
+    log.info(
+        "_find_jaw_cutoff_geometric: neck_y=%.4f  neck_x_width=%.4f  idx=%d",
+        neck_y, neck_x, neck_idx,
+    )
+
+    # ── Step 4: scan upward from neck; jaw = first X increase ≥ 20 % ─────────
+    jaw_threshold = neck_x * 1.20
+    jaw_idx = neck_idx
+
+    for i in range(neck_idx, n_samples):
+        if not valid[i]:
+            continue
+        if smoothed[i] > jaw_threshold:
+            jaw_idx = i
+            break
+
+    jaw_y    = float(y_samples[jaw_idx])
+    fraction = (y_max - jaw_y) / total_height
+
+    log.info(
+        "_find_jaw_cutoff_geometric: jaw_y=%.4f  fraction=%.3f from top",
+        jaw_y, fraction,
+    )
+
+    if not (0.05 <= fraction <= 0.55):
+        log.warning(
+            "_find_jaw_cutoff_geometric: fraction %.3f outside [0.05, 0.55]; ignoring.",
+            fraction,
+        )
+        return None
+
+    return jaw_y
+
+
 def _render_views(glb_path: Path) -> list[bytes]:
     """Render front and side silhouette views using matplotlib (headless, no display required)."""
     import io
@@ -312,7 +447,7 @@ def _render_views(glb_path: Path) -> list[bytes]:
     y_range = y_max - y_min
 
     # Reference fractions from the top (high Y) where lines will be drawn.
-    ref_fractions = [0.10, 0.15, 0.20, 0.25, 0.30]
+    ref_fractions = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
 
     views = [
         ("front (X-Y)", "X", "Y", x, y),
@@ -404,11 +539,15 @@ def _gemini_head_cutoff(view_images: list[bytes]) -> float:
         parts.append(
             "These images show 2D projections (front and side views) of a single merged 3D humanoid "
             "character mesh. The Y axis is the vertical axis (top = head, bottom = feet). "
-            "Horizontal reference lines are drawn at 10%, 15%, 20%, 25%, and 30% from the top. "
-            "At what fraction from the TOP does the head end and the neck/torso begin? "
-            "For a typical standing humanoid, the head+neck region is usually between 15% and 25% from the top. "
-            "Do not return a value below 0.15. "
-            "Reply with ONLY a single decimal number."
+            "Horizontal reference lines are drawn at 10%, 15%, 20%, 25%, 30%, 35%, and 40% from the top. "
+            "I need to find the BOTTOM OF THE JAW / CHIN — the point where the jawline meets the neck. "
+            "Everything from the chin/jawline UPWARD will be treated as the head for facial animation. "
+            "The jaw bottom is typically the LOWEST point of the chin, just above where the neck begins. "
+            "This is usually deeper into the figure than just the head crown — typically 25% to 38% from the top. "
+            "Look at both the front view (where you can see face width narrowing at the chin) and the side view "
+            "(where you can see the chin profile). "
+            "At what fraction from the TOP is the bottom of the jaw/chin? "
+            "Reply with ONLY a single decimal number between 0.15 and 0.40."
         )
 
         response = model.generate_content(parts)
@@ -418,8 +557,8 @@ def _gemini_head_cutoff(view_images: list[bytes]) -> float:
             log.warning("_gemini_head_cutoff: could not parse number from response %r; using default.", raw)
             return HEAD_Y_FRACTION
         value = float(match.group())
-        clamped = max(0.15, min(0.30, value))
-        log.info("Gemini returned head cutoff %.4f (clamped to %.4f)", value, clamped)
+        clamped = max(0.18, min(0.40, value))
+        log.info("Gemini returned jaw cutoff %.4f (clamped to %.4f)", value, clamped)
         return clamped
 
     except Exception as exc:
