@@ -340,6 +340,83 @@
       max-width: 320px;
     }
 
+    /* ── Adjust Neck Line section ──────────────────────────────────────── */
+    #adjust-canvas-wrap {
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0d0d0f;
+      height: 460px;
+      position: relative;
+      cursor: default;
+    }
+
+    #adjust-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    #adjust-loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 10px;
+      background: #0d0d0f;
+      font-size: 0.8rem;
+      color: #6b6b75;
+    }
+
+    .adjust-hint {
+      font-size: 0.75rem;
+      color: #55556a;
+      text-align: center;
+    }
+
+    .handle-legend {
+      display: flex;
+      gap: 18px;
+      font-size: 0.78rem;
+      color: #9090a8;
+      align-items: center;
+    }
+
+    .handle-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .adjust-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    #rig-it-btn {
+      background: #6e6eff;
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 24px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    #rig-it-btn:hover { background: #5a5aee; }
+
+    .y-readout {
+      font-family: monospace;
+      font-size: 0.82rem;
+    }
+
     /* ── Responsive collapse ───────────────────────────────────────────── */
     @media (max-width: 680px) {
       #preview-panel {
@@ -348,6 +425,7 @@
       }
       #canvas-wrap { height: 260px; }
       #morph-panel { height: 280px; }
+      #adjust-canvas-wrap { height: 300px; }
     }
   </style>
 </head>
@@ -374,7 +452,43 @@
     <!-- ── Spinner ── -->
     <div id="spinner-section">
       <div class="spinner"></div>
-      <p class="spinner-label">Rigging face...</p>
+      <p class="spinner-label" id="spinner-label">Analyzing model...</p>
+    </div>
+
+    <!-- ── Adjust Neck Line ── -->
+    <div id="adjust-section" style="display:none;flex-direction:column;gap:14px;width:100%;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <p style="font-size:0.9rem;color:#c0c0d0;text-align:center;">
+          Drag the handles to set the neck cut line, then click <strong>Rig It</strong>.
+        </p>
+        <div class="handle-legend">
+          <span style="display:flex;align-items:center;gap:6px;">
+            <span class="handle-dot" style="background:#f97316;"></span>Back (occipital)
+          </span>
+          <span style="display:flex;align-items:center;gap:6px;">
+            <span class="handle-dot" style="background:#6e6eff;"></span>Front (chin)
+          </span>
+        </div>
+      </div>
+
+      <div id="adjust-canvas-wrap">
+        <canvas id="adjust-canvas"></canvas>
+        <div id="adjust-loading">
+          <div class="spinner" style="width:28px;height:28px;border-width:2px;"></div>
+          <span>Loading model…</span>
+        </div>
+      </div>
+
+      <div class="adjust-footer">
+        <div class="handle-legend">
+          <span>Back Y: <code class="y-readout" id="back-y-disp" style="color:#f97316;">—</code></span>
+          <span>Front Y: <code class="y-readout" id="front-y-disp" style="color:#6e6eff;">—</code></span>
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button class="retry-btn" id="reupload-btn">← Re-upload</button>
+          <button id="rig-it-btn">Rig It →</button>
+        </div>
+      </div>
     </div>
 
     <!-- ── Success ── -->
@@ -436,24 +550,42 @@
     const selectedFile   = document.getElementById('selected-file');
     const uploadSection  = document.getElementById('upload-section');
     const spinnerSection = document.getElementById('spinner-section');
+    const spinnerLabel   = document.getElementById('spinner-label');
+    const adjustSection  = document.getElementById('adjust-section');
     const successSection = document.getElementById('success-section');
     const errorSection   = document.getElementById('error-section');
     const downloadBtn    = document.getElementById('download-btn');
     const errorMsg       = document.getElementById('error-msg');
     const retryBtn       = document.getElementById('retry-btn');
     const retryBtnErr    = document.getElementById('retry-btn-err');
+    const reuploadBtn    = document.getElementById('reupload-btn');
+    const rigItBtn       = document.getElementById('rig-it-btn');
     const morphList      = document.getElementById('morph-list');
     const canvasEl       = document.getElementById('preview-canvas');
     const canvasLoading  = document.getElementById('canvas-loading');
+    const adjustCanvasEl = document.getElementById('adjust-canvas');
+    const adjustLoading  = document.getElementById('adjust-loading');
+    const backYDisp      = document.getElementById('back-y-disp');
+    const frontYDisp     = document.getElementById('front-y-disp');
 
     // ── State ───────────────────────────────────────────────────────────
+    // Result viewer
     let renderer, scene, camera, controls, animId, keyLight;
     let headMesh = null;
     let currentAnimId = null;
 
+    // Adjust step
+    let tempId = null;
+    let yBack = null, yFront = null, zMin = null, zMax = null;
+    let adjRenderer = null, adjScene = null, adjCamera = null, adjControls = null;
+    let adjAnimId = null;
+    let planeMesh = null, backHandle = null, frontHandle = null;
+    let planeXMin = -1, planeXMax = 1;
+    let dragging = null;  // 'back' | 'front' | null
+
     // ── Section switcher ────────────────────────────────────────────────
     function showSection(section) {
-      [uploadSection, spinnerSection, successSection, errorSection].forEach(s => {
+      [uploadSection, spinnerSection, adjustSection, successSection, errorSection].forEach(s => {
         s.style.display = 'none';
       });
       section.style.display = 'flex';
@@ -464,12 +596,15 @@
       selectedFile.textContent = '';
       card.classList.remove('wide');
       _teardownRenderer();
+      _teardownAdjustRenderer();
       morphList.innerHTML = '';
+      tempId = null;
       showSection(uploadSection);
     }
 
     retryBtn.addEventListener('click', resetToUpload);
     retryBtnErr.addEventListener('click', resetToUpload);
+    reuploadBtn.addEventListener('click', resetToUpload);
 
     // ── Drag-and-drop ────────────────────────────────────────────────────
     dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
@@ -483,7 +618,7 @@
       if (fileInput.files.length) handleFile(fileInput.files[0]);
     });
 
-    // ── Upload & rig ─────────────────────────────────────────────────────
+    // ── Upload → /preview ────────────────────────────────────────────────
     async function handleFile(file) {
       if (!file.name.toLowerCase().endsWith('.glb')) {
         errorMsg.textContent = 'Please upload a .glb file.';
@@ -492,10 +627,49 @@
       }
 
       selectedFile.textContent = file.name;
+      spinnerLabel.textContent = 'Analyzing model…';
       showSection(spinnerSection);
 
       const formData = new FormData();
       formData.append('file', file);
+
+      try {
+        const response = await fetch('/preview', { method: 'POST', body: formData });
+        if (!response.ok) {
+          let detail = `Server error ${response.status}`;
+          try { const j = await response.json(); detail = j.detail || detail; } catch (_) {}
+          throw new Error(detail);
+        }
+
+        const data = await response.json();
+        tempId = data.temp_id;
+        yBack  = data.y_back;
+        yFront = data.y_front;
+        zMin   = data.z_min;
+        zMax   = data.z_max;
+
+        card.classList.add('wide');
+        showSection(adjustSection);
+        adjustLoading.style.display = 'flex';
+        _initAdjustRenderer();
+
+      } catch (err) {
+        errorMsg.textContent = err.message || 'An unexpected error occurred.';
+        showSection(errorSection);
+      }
+    }
+
+    // ── "Rig It" → /rig ─────────────────────────────────────────────────
+    rigItBtn.addEventListener('click', async () => {
+      spinnerLabel.textContent = 'Rigging face…';
+      card.classList.remove('wide');
+      _teardownAdjustRenderer();
+      showSection(spinnerSection);
+
+      const formData = new FormData();
+      formData.append('temp_id', tempId);
+      formData.append('y_back',  yBack.toString());
+      formData.append('y_front', yFront.toString());
 
       try {
         const response = await fetch('/rig', { method: 'POST', body: formData });
@@ -512,13 +686,234 @@
         card.classList.add('wide');
         showSection(successSection);
         canvasLoading.style.display = 'flex';
-
         _initRenderer(glbUrl);
 
       } catch (err) {
         errorMsg.textContent = err.message || 'An unexpected error occurred.';
         showSection(errorSection);
       }
+    });
+
+    // ── Adjust Neck Line renderer ────────────────────────────────────────
+    function _initAdjustRenderer() {
+      _teardownAdjustRenderer();
+
+      const wrap = document.getElementById('adjust-canvas-wrap');
+      const W = wrap.clientWidth;
+      const H = wrap.clientHeight;
+
+      adjRenderer = new THREE.WebGLRenderer({ canvas: adjustCanvasEl, antialias: true });
+      adjRenderer.setSize(W, H, false);
+      adjRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      adjRenderer.setClearColor(0x0d0d0f);
+      adjRenderer.outputColorSpace = THREE.SRGBColorSpace;
+
+      adjScene = new THREE.Scene();
+
+      adjCamera = new THREE.PerspectiveCamera(40, W / H, 0.001, 1000);
+      adjCamera.position.set(0, 0, 2);
+
+      adjScene.add(new THREE.HemisphereLight(0xfff6e8, 0x1a1a2e, 0.75));
+      const kl = new THREE.DirectionalLight(0xfffaf0, 2.4);
+      kl.position.set(0, 1, 2);
+      adjScene.add(kl);
+      const rim = new THREE.DirectionalLight(0x8aacff, 0.55);
+      rim.position.set(-0.6, 1.2, -2);
+      adjScene.add(rim);
+
+      adjControls = new OrbitControls(adjCamera, adjRenderer.domElement);
+      adjControls.enableDamping = true;
+      adjControls.dampingFactor = 0.07;
+
+      const loader = new GLTFLoader();
+      loader.load(
+        `/preview/${tempId}`,
+        gltf => {
+          adjScene.add(gltf.scene);
+
+          const box = new THREE.Box3().setFromObject(gltf.scene);
+          const size = box.getSize(new THREE.Vector3());
+          const center = box.getCenter(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+
+          adjCamera.position.set(center.x, center.y, center.z + maxDim * 1.8);
+          adjCamera.near = maxDim * 0.001;
+          adjCamera.far  = maxDim * 100;
+          adjCamera.updateProjectionMatrix();
+          adjControls.target.copy(center);
+          adjControls.update();
+
+          // Build cutting plane spanning model X + 20% margin.
+          planeXMin = box.min.x - size.x * 0.2;
+          planeXMax = box.max.x + size.x * 0.2;
+          const handleR = maxDim * 0.018;
+          _createCuttingPlane(handleR);
+
+          adjustLoading.style.display = 'none';
+        },
+        undefined,
+        err => { console.error('GLTFLoader (adjust):', err); adjustLoading.style.display = 'none'; }
+      );
+
+      function loop() {
+        adjAnimId = requestAnimationFrame(loop);
+        adjControls.update();
+        adjRenderer.render(adjScene, adjCamera);
+      }
+      loop();
+
+      adjustCanvasEl.addEventListener('pointerdown',  _onAdjPointerDown);
+      adjustCanvasEl.addEventListener('pointermove',  _onAdjPointerMove);
+      adjustCanvasEl.addEventListener('pointerup',    _onAdjPointerUp);
+      adjustCanvasEl.addEventListener('pointercancel',_onAdjPointerUp);
+
+      new ResizeObserver(() => {
+        if (!adjRenderer) return;
+        const w = wrap.clientWidth, h = wrap.clientHeight;
+        adjRenderer.setSize(w, h, false);
+        adjCamera.aspect = w / h;
+        adjCamera.updateProjectionMatrix();
+      }).observe(wrap);
+    }
+
+    function _createCuttingPlane(handleRadius) {
+      // Custom quad geometry — 4 vertices, 2 triangles.
+      const positions = new Float32Array(12);
+      const planeGeo = new THREE.BufferGeometry();
+      planeGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      planeGeo.setIndex([0, 2, 1,  1, 2, 3]);
+
+      const planeMat = new THREE.MeshBasicMaterial({
+        color: 0x4488ff,
+        transparent: true,
+        opacity: 0.28,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      planeMesh = new THREE.Mesh(planeGeo, planeMat);
+      planeMesh.renderOrder = 1;
+      adjScene.add(planeMesh);
+
+      // Edge lines for clearer visibility.
+      const lineMat = new THREE.LineBasicMaterial({ color: 0x88aaff, transparent: true, opacity: 0.7 });
+      const lineGeo = new THREE.BufferGeometry();
+      const linePos = new Float32Array(15);  // 5 points forming a closed quad outline
+      lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+      const edgeLines = new THREE.Line(lineGeo, lineMat);
+      adjScene.add(edgeLines);
+      planeMesh.userData.edgeLines = edgeLines;
+
+      const r = handleRadius || 0.015;
+      const backMat  = new THREE.MeshBasicMaterial({ color: 0xf97316 });
+      const frontMat = new THREE.MeshBasicMaterial({ color: 0x6e6eff });
+      backHandle  = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 16), backMat);
+      frontHandle = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 16), frontMat);
+      adjScene.add(backHandle);
+      adjScene.add(frontHandle);
+
+      _updateCuttingPlane(yBack, yFront);
+    }
+
+    function _updateCuttingPlane(newYBack, newYFront) {
+      yBack  = newYBack;
+      yFront = newYFront;
+
+      // Update quad vertices.
+      const pos = planeMesh.geometry.attributes.position;
+      pos.setXYZ(0, planeXMin, yBack,  zMin);  // back-left
+      pos.setXYZ(1, planeXMax, yBack,  zMin);  // back-right
+      pos.setXYZ(2, planeXMin, yFront, zMax);  // front-left
+      pos.setXYZ(3, planeXMax, yFront, zMax);  // front-right
+      pos.needsUpdate = true;
+      planeMesh.geometry.computeBoundingSphere();
+
+      // Update edge outline (closed loop: back-left → back-right → front-right → front-left → back-left).
+      const el = planeMesh.userData.edgeLines;
+      if (el) {
+        const lp = el.geometry.attributes.position;
+        lp.setXYZ(0, planeXMin, yBack,  zMin);
+        lp.setXYZ(1, planeXMax, yBack,  zMin);
+        lp.setXYZ(2, planeXMax, yFront, zMax);
+        lp.setXYZ(3, planeXMin, yFront, zMax);
+        lp.setXYZ(4, planeXMin, yBack,  zMin);
+        lp.needsUpdate = true;
+      }
+
+      backHandle.position.set(0, yBack,  zMin);
+      frontHandle.position.set(0, yFront, zMax);
+
+      backYDisp.textContent  = yBack.toFixed(4);
+      frontYDisp.textContent = yFront.toFixed(4);
+    }
+
+    // ── Pointer drag (Y-axis constrained) ────────────────────────────────
+    function _getNDC(e) {
+      const rect = adjustCanvasEl.getBoundingClientRect();
+      return new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width)  *  2 - 1,
+        ((e.clientY - rect.top)  / rect.height) * -2 + 1,
+      );
+    }
+
+    function _getYAtZ(e, targetZ) {
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(_getNDC(e), adjCamera);
+      const dir  = raycaster.ray.direction;
+      const orig = raycaster.ray.origin;
+      if (Math.abs(dir.z) < 1e-6) return null;
+      const t = (targetZ - orig.z) / dir.z;
+      if (t < 0) return null;
+      return orig.y + t * dir.y;
+    }
+
+    function _onAdjPointerDown(e) {
+      if (!backHandle || !frontHandle) return;
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(_getNDC(e), adjCamera);
+      // Give handles a slightly larger hit radius than their visual size.
+      raycaster.params.Mesh = { threshold: 0.01 };
+      const hits = raycaster.intersectObjects([backHandle, frontHandle]);
+      if (hits.length > 0) {
+        dragging = hits[0].object === backHandle ? 'back' : 'front';
+        adjControls.enabled = false;
+        adjustCanvasEl.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      }
+    }
+
+    function _onAdjPointerMove(e) {
+      if (!dragging) return;
+      const targetZ = dragging === 'back' ? zMin : zMax;
+      const newY = _getYAtZ(e, targetZ);
+      if (newY === null) return;
+      if (dragging === 'back') {
+        _updateCuttingPlane(newY, yFront);
+      } else {
+        _updateCuttingPlane(yBack, newY);
+      }
+    }
+
+    function _onAdjPointerUp(e) {
+      if (dragging) {
+        dragging = null;
+        adjControls.enabled = true;
+        if (e.pointerId != null) {
+          try { adjustCanvasEl.releasePointerCapture(e.pointerId); } catch (_) {}
+        }
+      }
+    }
+
+    function _teardownAdjustRenderer() {
+      if (adjAnimId) cancelAnimationFrame(adjAnimId);
+      adjAnimId = null;
+      adjustCanvasEl.removeEventListener('pointerdown',   _onAdjPointerDown);
+      adjustCanvasEl.removeEventListener('pointermove',   _onAdjPointerMove);
+      adjustCanvasEl.removeEventListener('pointerup',     _onAdjPointerUp);
+      adjustCanvasEl.removeEventListener('pointercancel', _onAdjPointerUp);
+      if (adjRenderer) { adjRenderer.dispose(); adjRenderer = null; }
+      adjScene = adjCamera = adjControls = null;
+      planeMesh = backHandle = frontHandle = null;
+      dragging = null;
     }
 
     // ── Three.js renderer ────────────────────────────────────────────────
