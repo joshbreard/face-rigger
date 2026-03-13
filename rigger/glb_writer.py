@@ -447,12 +447,19 @@ def _find_head_primitive(
                 best_prim = prim
 
     if best_prim is not None:
+        found_count = gltf.accessors[best_prim.attributes.POSITION].count
         log.info(
             "Head primitive found by vertex count proximity (expected=%d, found=%d, diff=%d).",
             expected_vert_count,
-            gltf.accessors[best_prim.attributes.POSITION].count,
+            found_count,
             best_diff,
         )
+        if best_diff > 0:
+            log.warning(
+                "Head primitive: name match failed for '%s'; vertex-count fallback diff=%d "
+                "(expected=%d, found=%d). Material/UV may be wrong.",
+                head_name, best_diff, expected_vert_count, found_count,
+            )
     return best_prim
 
 

@@ -93,14 +93,9 @@ def separate_head_body(
         scene_meta["original_head_name"] = head_name
         scene_meta["body_parts"] = named_body_parts
 
-        head_uvs: np.ndarray | None = None
-        visual = getattr(head_mesh, "visual", None)
-        uv_candidate = getattr(visual, "uv", None)
-        if uv_candidate is not None and len(uv_candidate) == len(head_mesh.vertices):
-            head_uvs = np.array(uv_candidate, dtype=np.float32)
-            log.info("Captured head UVs from trimesh visual: %d verts", len(head_uvs))
-        else:
-            log.info("Head mesh has no trimesh UV data; falling back to GLTF re-extraction.")
+        head_uvs = _extract_gltf_head_uvs(glb_path, head_name)
+        if head_uvs is None:
+            log.info("Head mesh has no GLTF UV data; falling back to GLTF re-extraction in writer.")
         scene_meta["head_uvs"] = head_uvs
 
         return head_mesh, body_mesh, scene_meta
@@ -208,14 +203,9 @@ def separate_head_body(
     )
     scene_meta["original_head_name"] = head_name
 
-    head_uvs_g: np.ndarray | None = None
-    visual_g = getattr(head_mesh, "visual", None)
-    uv_candidate_g = getattr(visual_g, "uv", None)
-    if uv_candidate_g is not None and len(uv_candidate_g) == len(head_mesh.vertices):
-        head_uvs_g = np.array(uv_candidate_g, dtype=np.float32)
-        log.info("Captured head UVs from trimesh visual: %d verts", len(head_uvs_g))
-    else:
-        log.info("Head mesh has no trimesh UV data; falling back to GLTF re-extraction.")
+    head_uvs_g = _extract_gltf_head_uvs(glb_path, head_name)
+    if head_uvs_g is None:
+        log.info("Head mesh has no GLTF UV data; falling back to GLTF re-extraction in writer.")
     scene_meta["head_uvs"] = head_uvs_g
 
     return head_mesh, body_mesh, scene_meta
@@ -225,6 +215,44 @@ def separate_head_body(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _extract_gltf_head_uvs(glb_path: Path, head_name: str | None) -> np.ndarray | None:
+    """Extract TEXCOORD_0 UV data for the head mesh directly from the GLTF binary.
+
+    Returns (M, 2) float32 array or None if not found.
+    """
+    try:
+        import pygltflib
+        orig_gltf = pygltflib.GLTF2.load(str(glb_path))
+        orig_binary = orig_gltf.binary_blob()
+        if orig_binary is None:
+            return None
+
+        prim = None
+        if head_name is not None:
+            for mesh in orig_gltf.meshes:
+                if mesh.name and (
+                    head_name.lower() in mesh.name.lower()
+                    or mesh.name.lower() in head_name.lower()
+                ):
+                    if mesh.primitives:
+                        prim = mesh.primitives[0]
+                        break
+
+        if prim is None or prim.attributes.TEXCOORD_0 is None:
+            return None
+
+        acc = orig_gltf.accessors[prim.attributes.TEXCOORD_0]
+        bv = orig_gltf.bufferViews[acc.bufferView]
+        byte_offset = (bv.byteOffset or 0) + (acc.byteOffset or 0)
+        raw = orig_binary[byte_offset: byte_offset + acc.count * 8]  # 2 floats * 4 bytes
+        uvs = np.frombuffer(raw, dtype=np.float32).reshape(-1, 2).copy()
+        log.info("Extracted %d UV verts from GLTF binary for head '%s'.", len(uvs), head_name)
+        return uvs
+    except Exception as exc:
+        log.warning("_extract_gltf_head_uvs failed: %s", exc)
+        return None
+
+
 def _concat(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
     if len(meshes) == 1:
         return meshes[0]
@@ -232,62 +260,76 @@ def _concat(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
 
 
 def _render_views(glb_path: Path) -> list[bytes]:
-    """Render front, side, and 45-degree views of the GLB; return PNG bytes."""
-    import math
+    """Render front, side, and 45-degree views using matplotlib (headless, no display required)."""
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3d projection
 
     try:
-        scene = trimesh.load(str(glb_path), force="scene", process=False)
+        scene_or_mesh = trimesh.load(str(glb_path), force="scene", process=False)
+        if isinstance(scene_or_mesh, trimesh.Trimesh):
+            verts = np.array(scene_or_mesh.vertices)
+        else:
+            meshes = [g for g in scene_or_mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
+            if not meshes:
+                log.warning("_render_views: no Trimesh geometry found in GLB.")
+                return []
+            verts = np.concatenate([np.array(m.vertices) for m in meshes], axis=0)
     except Exception as exc:
         log.warning("_render_views: failed to load GLB: %s", exc)
         return []
 
-    # Camera transforms: columns are [right, up, -forward, position] in homogeneous coords.
-    # trimesh uses OpenGL convention: camera looks down -Z.
-    def _look_from(eye, target=(0, 0, 0), up=(0, 1, 0)):
-        """Build a 4x4 camera-to-world transform."""
-        eye = np.array(eye, dtype=float)
-        target = np.array(target, dtype=float)
-        up = np.array(up, dtype=float)
-        fwd = target - eye
-        fwd /= np.linalg.norm(fwd)
-        right = np.cross(fwd, up)
-        right /= np.linalg.norm(right)
-        true_up = np.cross(right, fwd)
-        mat = np.eye(4)
-        mat[:3, 0] = right
-        mat[:3, 1] = true_up
-        mat[:3, 2] = -fwd   # camera -Z points toward scene
-        mat[:3, 3] = eye
-        return mat
+    # Subsample for speed — Gemini only needs shape context, not full density.
+    if len(verts) > 4000:
+        idx = np.random.default_rng(0).choice(len(verts), 4000, replace=False)
+        verts = verts[idx]
 
-    # Compute a reasonable camera distance from the scene bounds.
-    try:
-        bounds = scene.bounds  # (2, 3)
-        center = bounds.mean(axis=0)
-        extent = (bounds[1] - bounds[0]).max()
-        dist = extent * 2.0
-    except Exception:
-        center = np.zeros(3)
-        dist = 2.0
+    x, y, z = verts[:, 0], verts[:, 1], verts[:, 2]
+    s = 1  # scatter point size
 
-    camera_transforms = [
-        _look_from(center + np.array([0, 0, dist]), center),           # front (+Z)
-        _look_from(center + np.array([dist, 0, 0]), center),           # side (+X)
-        _look_from(center + np.array([dist * math.cos(math.radians(45)),
-                                       0,
-                                       dist * math.sin(math.radians(45))]), center),  # 45°
+    views = [
+        ("front", "X", "Y", x, y),
+        ("side",  "Z", "Y", z, y),
     ]
 
     images: list[bytes] = []
-    for i, transform in enumerate(camera_transforms):
-        try:
-            scene.camera_transform = transform
-            png = scene.save_image(resolution=[512, 512])
-            if png:
-                images.append(png)
-        except Exception as exc:
-            log.warning("_render_views: view %d failed: %s", i, exc)
 
+    # Front and side 2-D projections.
+    for label, xlabel, ylabel, hx, hy in views:
+        try:
+            fig, ax = plt.subplots(figsize=(4, 4), dpi=128)
+            ax.scatter(hx, hy, s=s, c="steelblue", linewidths=0)
+            ax.set_aspect("equal")
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.set_title(label)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight")
+            plt.close(fig)
+            images.append(buf.getvalue())
+        except Exception as exc:
+            log.warning("_render_views: %s view failed: %s", label, exc)
+
+    # 45-degree 3-D scatter.
+    try:
+        fig = plt.figure(figsize=(4, 4), dpi=128)
+        ax3d = fig.add_subplot(111, projection="3d")
+        ax3d.scatter(x, z, y, s=s, c="steelblue", linewidths=0)
+        ax3d.view_init(elev=20, azim=45)
+        ax3d.set_xlabel("X")
+        ax3d.set_ylabel("Z")
+        ax3d.set_zlabel("Y")
+        ax3d.set_title("45°")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        plt.close(fig)
+        images.append(buf.getvalue())
+    except Exception as exc:
+        log.warning("_render_views: 3D view failed: %s", exc)
+
+    log.info("_render_views: produced %d view(s) for Gemini.", len(images))
     return images
 
 
