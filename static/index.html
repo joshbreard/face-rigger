@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>face-rigger</title>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0d0d0f;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #e2e2e5;
+      padding: 24px;
+    }
+
+    /* ── Card ──────────────────────────────────────────────────────────── */
+    .card {
+      background: #17171a;
+      border: 1px solid #2a2a30;
+      border-radius: 16px;
+      padding: 48px 40px;
+      width: 420px;
+      max-width: 95vw;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+      transition: width 0.35s ease, padding 0.35s ease;
+    }
+
+    .card.wide {
+      width: min(960px, 95vw);
+      padding: 32px 32px;
+      align-items: stretch;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: #f0f0f3;
+      text-align: center;
+    }
+
+    p.subtitle {
+      font-size: 0.85rem;
+      color: #6b6b75;
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    /* ── Drop zone ─────────────────────────────────────────────────────── */
+    #drop-zone {
+      width: 100%;
+      border: 2px dashed #2e2e38;
+      border-radius: 12px;
+      padding: 40px 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+    }
+
+    #drop-zone:hover,
+    #drop-zone.drag-over {
+      border-color: #5b5bff;
+      background: rgba(91, 91, 255, 0.05);
+    }
+
+    #drop-zone svg { opacity: 0.5; }
+
+    #drop-zone .drop-label {
+      font-size: 0.9rem;
+      color: #8888a0;
+      text-align: center;
+    }
+
+    #drop-zone .drop-label span {
+      color: #6e6eff;
+      font-weight: 500;
+    }
+
+    #file-input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+
+    #selected-file {
+      font-size: 0.8rem;
+      color: #9090a8;
+      text-align: center;
+      min-height: 1.2em;
+    }
+
+    /* ── Spinner ───────────────────────────────────────────────────────── */
+    #spinner-section {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #2a2a35;
+      border-top-color: #6e6eff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .spinner-label {
+      font-size: 0.9rem;
+      color: #8888a0;
+    }
+
+    /* ── Success ───────────────────────────────────────────────────────── */
+    #success-section {
+      display: none;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .success-header {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .checkmark {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      background: rgba(34, 197, 94, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .checkmark svg { stroke: #22c55e; }
+
+    .success-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    #download-btn {
+      background: #22c55e;
+      color: #051a0e;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 22px;
+      cursor: pointer;
+      transition: background 0.15s;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    #download-btn:hover { background: #16a34a; }
+
+    .retry-btn {
+      background: transparent;
+      color: #6e6eff;
+      border: 1px solid #3a3a55;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .retry-btn:hover { background: rgba(91, 91, 255, 0.08); }
+
+    /* ── Preview panel ─────────────────────────────────────────────────── */
+    #preview-panel {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 16px;
+      height: 440px;
+    }
+
+    #canvas-wrap {
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0d0d0f;
+      position: relative;
+    }
+
+    #preview-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    #canvas-loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 10px;
+      background: #0d0d0f;
+      font-size: 0.8rem;
+      color: #6b6b75;
+    }
+
+    /* ── Morph target list ─────────────────────────────────────────────── */
+    #morph-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      background: #111114;
+      border: 1px solid #22222a;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    #morph-panel-header {
+      padding: 10px 14px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #55556a;
+      border-bottom: 1px solid #22222a;
+      flex-shrink: 0;
+    }
+
+    #morph-list {
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    #morph-list::-webkit-scrollbar { width: 4px; }
+    #morph-list::-webkit-scrollbar-track { background: transparent; }
+    #morph-list::-webkit-scrollbar-thumb { background: #2a2a35; border-radius: 2px; }
+
+    .morph-row {
+      display: grid;
+      grid-template-columns: 20px 1fr 80px;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 12px;
+      border-bottom: 1px solid #1a1a22;
+      transition: background 0.1s;
+    }
+
+    .morph-row:last-child { border-bottom: none; }
+    .morph-row:hover { background: rgba(255, 255, 255, 0.03); }
+
+    .morph-status {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .morph-status.ok  { color: #22c55e; }
+    .morph-status.zero { color: #ef4444; }
+
+    .morph-name {
+      font-size: 0.75rem;
+      color: #c0c0d0;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding: 2px 0;
+      border-radius: 3px;
+      transition: color 0.1s;
+    }
+
+    .morph-name:hover { color: #a0a0ff; }
+    .morph-name.playing { color: #6e6eff; }
+
+    .morph-slider {
+      width: 100%;
+      accent-color: #6e6eff;
+      cursor: pointer;
+      height: 14px;
+    }
+
+    /* ── Error ─────────────────────────────────────────────────────────── */
+    #error-section {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .error-icon {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      background: rgba(239, 68, 68, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .error-icon svg { stroke: #ef4444; }
+
+    #error-msg {
+      font-size: 0.85rem;
+      color: #ef4444;
+      text-align: center;
+      max-width: 320px;
+    }
+
+    /* ── Responsive collapse ───────────────────────────────────────────── */
+    @media (max-width: 680px) {
+      #preview-panel {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      #canvas-wrap { height: 260px; }
+      #morph-panel { height: 280px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <h1>face-rigger</h1>
+    <p class="subtitle">Upload a Meshy GLB to auto-rig 52 ARKit morph targets for Audio2Face.</p>
+
+    <!-- ── Upload ── -->
+    <div id="upload-section" style="width:100%;display:flex;flex-direction:column;align-items:center;gap:16px;">
+      <div id="drop-zone">
+        <input type="file" id="file-input" accept=".glb" />
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none"
+             stroke="#8888a0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <p class="drop-label">Drag &amp; drop your GLB here<br/>or <span>click to browse</span></p>
+      </div>
+      <p id="selected-file"></p>
+    </div>
+
+    <!-- ── Spinner ── -->
+    <div id="spinner-section">
+      <div class="spinner"></div>
+      <p class="spinner-label">Rigging face...</p>
+    </div>
+
+    <!-- ── Success ── -->
+    <div id="success-section">
+      <div class="success-header">
+        <div class="checkmark">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+               stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </div>
+        <p style="font-size:0.9rem;color:#86efac;">Rigging complete!</p>
+        <div class="success-actions">
+          <a id="download-btn" href="#" download="rigged_output.glb">Download Rigged GLB</a>
+          <button class="retry-btn" id="retry-btn">Rig another file</button>
+        </div>
+      </div>
+
+      <!-- ── Three.js preview + morph target list ── -->
+      <div id="preview-panel">
+        <div id="canvas-wrap">
+          <canvas id="preview-canvas"></canvas>
+          <div id="canvas-loading">
+            <div class="spinner" style="width:28px;height:28px;border-width:2px;"></div>
+            <span>Loading preview…</span>
+          </div>
+        </div>
+
+        <div id="morph-panel">
+          <div id="morph-panel-header">Morph Targets — click name to preview</div>
+          <div id="morph-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Error ── -->
+    <div id="error-section">
+      <div class="error-icon">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </div>
+      <p id="error-msg"></p>
+      <button class="retry-btn" id="retry-btn-err">Try again</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // ── DOM refs ────────────────────────────────────────────────────────
+    const card           = document.getElementById('card');
+    const dropZone       = document.getElementById('drop-zone');
+    const fileInput      = document.getElementById('file-input');
+    const selectedFile   = document.getElementById('selected-file');
+    const uploadSection  = document.getElementById('upload-section');
+    const spinnerSection = document.getElementById('spinner-section');
+    const successSection = document.getElementById('success-section');
+    const errorSection   = document.getElementById('error-section');
+    const downloadBtn    = document.getElementById('download-btn');
+    const errorMsg       = document.getElementById('error-msg');
+    const retryBtn       = document.getElementById('retry-btn');
+    const retryBtnErr    = document.getElementById('retry-btn-err');
+    const morphList      = document.getElementById('morph-list');
+    const canvasEl       = document.getElementById('preview-canvas');
+    const canvasLoading  = document.getElementById('canvas-loading');
+
+    // ── State ───────────────────────────────────────────────────────────
+    let renderer, scene, camera, controls, animId, keyLight;
+    let headMesh = null;
+    let currentAnimId = null;
+
+    // ── Section switcher ────────────────────────────────────────────────
+    function showSection(section) {
+      [uploadSection, spinnerSection, successSection, errorSection].forEach(s => {
+        s.style.display = 'none';
+      });
+      section.style.display = 'flex';
+    }
+
+    function resetToUpload() {
+      fileInput.value = '';
+      selectedFile.textContent = '';
+      card.classList.remove('wide');
+      _teardownRenderer();
+      morphList.innerHTML = '';
+      showSection(uploadSection);
+    }
+
+    retryBtn.addEventListener('click', resetToUpload);
+    retryBtnErr.addEventListener('click', resetToUpload);
+
+    // ── Drag-and-drop ────────────────────────────────────────────────────
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length) handleFile(fileInput.files[0]);
+    });
+
+    // ── Upload & rig ─────────────────────────────────────────────────────
+    async function handleFile(file) {
+      if (!file.name.toLowerCase().endsWith('.glb')) {
+        errorMsg.textContent = 'Please upload a .glb file.';
+        showSection(errorSection);
+        return;
+      }
+
+      selectedFile.textContent = file.name;
+      showSection(spinnerSection);
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const response = await fetch('/rig', { method: 'POST', body: formData });
+        if (!response.ok) {
+          let detail = `Server error ${response.status}`;
+          try { const j = await response.json(); detail = j.detail || detail; } catch (_) {}
+          throw new Error(detail);
+        }
+
+        const blob = await response.blob();
+        const glbUrl = URL.createObjectURL(blob);
+
+        downloadBtn.href = glbUrl;
+        card.classList.add('wide');
+        showSection(successSection);
+        canvasLoading.style.display = 'flex';
+
+        _initRenderer(glbUrl);
+
+      } catch (err) {
+        errorMsg.textContent = err.message || 'An unexpected error occurred.';
+        showSection(errorSection);
+      }
+    }
+
+    // ── Three.js renderer ────────────────────────────────────────────────
+    function _initRenderer(glbUrl) {
+      _teardownRenderer();
+      headMesh = null;
+      morphList.innerHTML = '';
+
+      const wrap = document.getElementById('canvas-wrap');
+      const W = wrap.clientWidth;
+      const H = wrap.clientHeight;
+
+      renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true });
+      renderer.setSize(W, H, false);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setClearColor(0x0d0d0f);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+      scene = new THREE.Scene();
+
+      camera = new THREE.PerspectiveCamera(40, W / H, 0.001, 1000);
+      camera.position.set(0, 0, 2);
+
+      // Hemisphere light: warm sky tone above, cool shadow tone below — wraps the
+      // whole mesh in gentle fill so no area goes completely black.
+      const hemi = new THREE.HemisphereLight(0xfff6e8, 0x1a1a2e, 0.75);
+      scene.add(hemi);
+
+      // Key light: strong warm-white, aimed at the face. Position is a placeholder
+      // — it gets repositioned once the model loads and we know the head center.
+      keyLight = new THREE.DirectionalLight(0xfffaf0, 2.4);
+      keyLight.position.set(0, 1, 2);   // updated in _onGLTFLoaded
+      scene.add(keyLight);
+      scene.add(keyLight.target);       // target must be in the scene for lookAt to work
+
+      // Rim light: cool blue from upper-rear to separate head from background.
+      const rim = new THREE.DirectionalLight(0x8aacff, 0.55);
+      rim.position.set(-0.6, 1.2, -2);
+      scene.add(rim);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.07;
+      controls.autoRotate = false;
+      // Left-drag = orbit, right-drag = pan, scroll = zoom (Three.js defaults).
+      // Shift + left-drag also pans (built into OrbitControls).
+      controls.mouseButtons = {
+        LEFT:   THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT:  THREE.MOUSE.PAN,
+      };
+
+      const loader = new GLTFLoader();
+      loader.load(
+        glbUrl,
+        gltf => _onGLTFLoaded(gltf),
+        undefined,
+        err => { console.error('GLTFLoader error', err); canvasLoading.style.display = 'none'; }
+      );
+
+      function renderLoop() {
+        animId = requestAnimationFrame(renderLoop);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      renderLoop();
+
+      // Resize observer
+      new ResizeObserver(() => {
+        if (!renderer) return;
+        const w = wrap.clientWidth, h = wrap.clientHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }).observe(wrap);
+    }
+
+    function _onGLTFLoaded(gltf) {
+      scene.add(gltf.scene);
+
+      // Find the first mesh with morph targets
+      gltf.scene.traverse(obj => {
+        if (!headMesh && obj.isMesh && obj.morphTargetDictionary
+            && Object.keys(obj.morphTargetDictionary).length > 0) {
+          headMesh = obj;
+          // Use a standard material so we see the mesh clearly regardless of textures
+          obj.material = new THREE.MeshStandardMaterial({
+            color: 0xc8b8a8,
+            roughness: 0.65,
+            metalness: 0.05,
+          });
+          obj.material.needsUpdate = true;
+        }
+      });
+
+      // ── Camera framing: tight on head/face ───────────────────────────
+      // Use the full scene box only for near/far clip planes.
+      const sceneBox  = new THREE.Box3().setFromObject(gltf.scene);
+      const sceneSize = sceneBox.getSize(new THREE.Vector3());
+      const sceneDim  = Math.max(sceneSize.x, sceneSize.y, sceneSize.z);
+
+      // Prefer the head mesh bbox for framing; fall back to full scene.
+      const frameTarget = headMesh
+        ? new THREE.Box3().setFromObject(headMesh)
+        : sceneBox;
+
+      const frameSize   = frameTarget.getSize(new THREE.Vector3());
+      const frameCenter = frameTarget.getCenter(new THREE.Vector3());
+      const headHeight  = frameSize.y;
+      const headWidth   = frameSize.x;
+
+      // Orbit target: roughly nose/mid-face (≈ 35 % down from crown).
+      const orbitTarget = new THREE.Vector3(
+        frameCenter.x,
+        frameTarget.max.y - headHeight * 0.35,
+        frameCenter.z,
+      );
+
+      // Camera sits directly in front at 1.7× head-height distance.
+      const camDist = headHeight * 1.7;
+      camera.position.set(orbitTarget.x, orbitTarget.y, orbitTarget.z + camDist);
+      camera.near = sceneDim * 0.001;
+      camera.far  = sceneDim * 60;
+      camera.updateProjectionMatrix();
+
+      controls.target.copy(orbitTarget);
+      controls.minDistance = headHeight * 0.3;
+      controls.maxDistance = sceneDim  * 4.0;
+      controls.update();
+
+      // ── Reposition key light relative to face center ─────────────────
+      // Place it front-right, 50 % of head height above face center,
+      // aimed directly at the orbit target (nose area).
+      if (keyLight) {
+        keyLight.position.set(
+          orbitTarget.x + headWidth  * 0.45,
+          orbitTarget.y + headHeight * 0.50,
+          orbitTarget.z + headHeight * 1.40,
+        );
+        keyLight.target.position.copy(orbitTarget);
+        keyLight.target.updateMatrixWorld();
+      }
+
+      canvasLoading.style.display = 'none';
+      _buildMorphList();
+    }
+
+    function _teardownRenderer() {
+      if (animId) cancelAnimationFrame(animId);
+      if (currentAnimId) cancelAnimationFrame(currentAnimId);
+      currentAnimId = null;
+      animId = null;
+      if (renderer) { renderer.dispose(); renderer = null; }
+      scene = camera = controls = keyLight = null;
+    }
+
+    // ── Morph target list ────────────────────────────────────────────────
+    function _buildMorphList() {
+      morphList.innerHTML = '';
+      if (!headMesh || !headMesh.morphTargetDictionary) return;
+
+      const dict = headMesh.morphTargetDictionary;
+      // Sort entries by index so the list matches the canonical order
+      const entries = Object.entries(dict).sort((a, b) => a[1] - b[1]);
+      const morphPositions = headMesh.geometry.morphAttributes.position || [];
+
+      for (const [name, idx] of entries) {
+        // Detect whether this morph target has any non-zero displacement
+        let nonZero = false;
+        const posAttr = morphPositions[idx];
+        if (posAttr) {
+          for (let i = 0; i < posAttr.count && !nonZero; i++) {
+            if (posAttr.getX(i) !== 0 || posAttr.getY(i) !== 0 || posAttr.getZ(i) !== 0) {
+              nonZero = true;
+            }
+          }
+        }
+
+        const row = document.createElement('div');
+        row.className = 'morph-row';
+        row.dataset.idx = idx;
+
+        const statusEl = document.createElement('span');
+        statusEl.className = `morph-status ${nonZero ? 'ok' : 'zero'}`;
+        statusEl.textContent = nonZero ? '✓' : '✗';
+        statusEl.title = nonZero ? 'Non-zero displacement' : 'Zero displacement';
+
+        const nameEl = document.createElement('span');
+        nameEl.className = 'morph-name';
+        nameEl.textContent = name;
+        nameEl.title = 'Click to animate 0 → 1 → 0';
+        nameEl.addEventListener('click', () => _animateMorph(idx, nameEl));
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.className = 'morph-slider';
+        slider.min = 0; slider.max = 1; slider.step = 0.01; slider.value = 0;
+        slider.addEventListener('input', () => {
+          if (headMesh) headMesh.morphTargetInfluences[idx] = parseFloat(slider.value);
+        });
+
+        row.appendChild(statusEl);
+        row.appendChild(nameEl);
+        row.appendChild(slider);
+        morphList.appendChild(row);
+      }
+    }
+
+    // ── Morph animation ──────────────────────────────────────────────────
+    function _animateMorph(idx, nameEl) {
+      if (currentAnimId) cancelAnimationFrame(currentAnimId);
+
+      // Clear all influences first
+      if (headMesh) {
+        headMesh.morphTargetInfluences.fill(0);
+        // Reset all sliders
+        document.querySelectorAll('.morph-slider').forEach(s => s.value = 0);
+        document.querySelectorAll('.morph-name').forEach(n => n.classList.remove('playing'));
+      }
+      nameEl.classList.add('playing');
+
+      const slider = morphList.querySelector(`.morph-row[data-idx="${idx}"] .morph-slider`);
+      const duration = 1200; // ms
+      const start = performance.now();
+
+      function step(now) {
+        const t = Math.min((now - start) / duration, 1.0);
+        // Ease: 0 → 1 → 0 (smooth triangle via sine)
+        const value = Math.sin(t * Math.PI);
+        if (headMesh) headMesh.morphTargetInfluences[idx] = value;
+        if (slider) slider.value = value.toFixed(4);
+
+        if (t < 1.0) {
+          currentAnimId = requestAnimationFrame(step);
+        } else {
+          if (headMesh) headMesh.morphTargetInfluences[idx] = 0;
+          if (slider) slider.value = 0;
+          nameEl.classList.remove('playing');
+          currentAnimId = null;
+        }
+      }
+      currentAnimId = requestAnimationFrame(step);
+    }
+  </script>
+</body>
+</html>
