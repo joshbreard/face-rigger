@@ -2,12 +2,12 @@
 
 Strategy
 --------
-1. Load the GLB with trimesh and inspect every mesh node name.
-2. If any node name contains "head" or "face" (case-insensitive), treat that
-   mesh as the head and concatenate everything else as the body.
-3. Fallback: merge all meshes into one, compute the full bounding-box, and
-   keep only vertices whose Y coordinate is in the top 22 % of that range as
-   the "head" sub-mesh; the rest becomes the body.
+1. Load the GLB with trimesh and inspect every mesh node.
+2. If any node name contains a HEAD_KEYWORD (case-insensitive), treat that
+   mesh as the head; everything else is the body.
+3. Fallback: merge all meshes, compute the full bounding box, and pick the
+   largest mesh (by vertex count) whose centroid Y >= the top-50% threshold.
+   If no single mesh qualifies, keep all geometry above that threshold.
 """
 
 import logging
@@ -20,8 +20,9 @@ import trimesh.scene
 
 log = logging.getLogger(__name__)
 
-HEAD_KEYWORDS = ("head", "face")
-HEAD_Y_FRACTION = 0.22  # top fraction of bounding box treated as head
+# Meshy exports use names like "Wolf3D_Head", "Head", "Face", "Hair", etc.
+HEAD_KEYWORDS = ("wolf3d", "head", "face", "hair", "skull", "neck")
+HEAD_Y_FRACTION = 0.50  # top fraction of full bounding box treated as head
 
 
 def separate_head_body(
@@ -33,58 +34,107 @@ def separate_head_body(
     -------
     head_mesh : trimesh.Trimesh
     body_mesh : trimesh.Trimesh | None
-        None when the entire model is the head (no leftover geometry).
     scene_meta : dict
-        Preserved metadata (transform graph, extras, etc.) for round-tripping.
+        Includes ``original_head_name`` — the geometry node name of the
+        selected head mesh (used by glb_writer to re-extract UV/materials).
     """
     scene_or_mesh = trimesh.load(str(glb_path), force="scene", process=False)
 
     if isinstance(scene_or_mesh, trimesh.Trimesh):
-        log.info("GLB contained a single mesh; treating entire mesh as head.")
-        return scene_or_mesh, None, {}
+        log.info("GLB contained a single mesh (%d verts); treating as head.", len(scene_or_mesh.vertices))
+        return scene_or_mesh, None, {"original_head_name": None}
 
     scene: trimesh.scene.Scene = scene_or_mesh
     scene_meta: dict[str, Any] = {"graph": scene.graph, "metadata": scene.metadata}
 
-    named_head_meshes: list[trimesh.Trimesh] = []
-    named_body_meshes: list[trimesh.Trimesh] = []
-
-    geometry_names = list(scene.geometry.keys())
-    log.info("Scene contains %d geometry nodes: %s", len(geometry_names), geometry_names)
-
+    trimeshes: dict[str, trimesh.Trimesh] = {}
+    log.info("Scene geometry nodes:")
     for name, geom in scene.geometry.items():
         if not isinstance(geom, trimesh.Trimesh):
-            log.debug("Skipping non-Trimesh geometry '%s'.", name)
+            log.info("  %-30s  (skipped — not a Trimesh)", name)
             continue
-        if any(kw in name.lower() for kw in HEAD_KEYWORDS):
-            log.info("Name-match head: '%s'", name)
-            named_head_meshes.append(geom)
-        else:
-            named_body_meshes.append(geom)
-
-    if named_head_meshes:
-        head_mesh = _concat(named_head_meshes)
-        body_mesh = _concat(named_body_meshes) if named_body_meshes else None
+        verts = np.array(geom.vertices)
+        y_min, y_max = verts[:, 1].min(), verts[:, 1].max()
+        y_centroid = verts[:, 1].mean()
         log.info(
-            "Name-based split: head vertices=%d, body vertices=%s",
+            "  %-30s  verts=%6d  Y=[%.4f, %.4f]  centroid_Y=%.4f",
+            name, len(verts), y_min, y_max, y_centroid,
+        )
+        trimeshes[name] = geom
+
+    if not trimeshes:
+        raise ValueError("GLB contains no Trimesh geometry nodes.")
+
+    # ── Strategy 1: keyword match ────────────────────────────────────────────
+    named_head: list[trimesh.Trimesh] = []
+    named_body: list[trimesh.Trimesh] = []
+    head_name: str | None = None
+
+    for name, geom in trimeshes.items():
+        if any(kw in name.lower() for kw in HEAD_KEYWORDS):
+            log.info("Keyword match -> HEAD: '%s'", name)
+            named_head.append(geom)
+            head_name = name
+        else:
+            named_body.append(geom)
+
+    if named_head:
+        head_mesh = _concat(named_head)
+        body_mesh = _concat(named_body) if named_body else None
+        log.info(
+            "Name-based split: head=%d verts, body=%s verts, head_name='%s'",
             len(head_mesh.vertices),
             len(body_mesh.vertices) if body_mesh else 0,
+            head_name,
         )
+        scene_meta["original_head_name"] = head_name
         return head_mesh, body_mesh, scene_meta
 
-    # Fallback: bounding-box Y split
+    # ── Strategy 2: Y-centroid threshold fallback ────────────────────────────
     log.info(
-        "No head/face node names found; falling back to top-%.0f%% bounding-box split.",
+        "No keyword matches; falling back to top-%.0f%% bounding-box Y split.",
         HEAD_Y_FRACTION * 100,
     )
-    all_meshes = [g for g in scene.geometry.values() if isinstance(g, trimesh.Trimesh)]
+    all_names = list(trimeshes.keys())
+    all_meshes = list(trimeshes.values())
     full_mesh = _concat(all_meshes)
-    head_mesh, body_mesh = _split_by_y(full_mesh)
+    all_verts = np.array(full_mesh.vertices)
+    y_min_full, y_max_full = all_verts[:, 1].min(), all_verts[:, 1].max()
+    y_threshold = y_max_full - HEAD_Y_FRACTION * (y_max_full - y_min_full)
     log.info(
-        "Bounding-box split: head vertices=%d, body vertices=%d",
+        "Full Y range [%.4f, %.4f]; head threshold Y >= %.4f",
+        y_min_full, y_max_full, y_threshold,
+    )
+
+    head_candidates: list[tuple[str, trimesh.Trimesh]] = []
+    body_candidates: list[tuple[str, trimesh.Trimesh]] = []
+    for name, geom in zip(all_names, all_meshes):
+        centroid_y = np.array(geom.vertices)[:, 1].mean()
+        if centroid_y >= y_threshold:
+            log.info("  Y-centroid %.4f >= threshold -> HEAD: '%s'", centroid_y, name)
+            head_candidates.append((name, geom))
+        else:
+            body_candidates.append((name, geom))
+
+    if head_candidates:
+        # Largest head candidate by vertex count drives the head_name.
+        head_candidates.sort(key=lambda x: len(x[1].vertices), reverse=True)
+        head_name = head_candidates[0][0]
+        head_mesh = _concat([g for _, g in head_candidates])
+        body_mesh = _concat([g for _, g in body_candidates]) if body_candidates else None
+    else:
+        log.warning("No mesh centroid above Y threshold; using full mesh as head.")
+        head_mesh = full_mesh
+        body_mesh = None
+        head_name = all_names[0] if all_names else None
+
+    log.info(
+        "Y-fallback split: head=%d verts, body=%s verts, head_name='%s'",
         len(head_mesh.vertices),
         len(body_mesh.vertices) if body_mesh else 0,
+        head_name,
     )
+    scene_meta["original_head_name"] = head_name
     return head_mesh, body_mesh, scene_meta
 
 
@@ -96,34 +146,3 @@ def _concat(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
     if len(meshes) == 1:
         return meshes[0]
     return trimesh.util.concatenate(meshes)
-
-
-def _split_by_y(
-    mesh: trimesh.Trimesh,
-) -> tuple[trimesh.Trimesh, trimesh.Trimesh | None]:
-    """Split *mesh* into top-22% (head) and the rest (body) by Y coordinate."""
-    verts = np.array(mesh.vertices)
-    y_min, y_max = verts[:, 1].min(), verts[:, 1].max()
-    y_threshold = y_max - HEAD_Y_FRACTION * (y_max - y_min)
-
-    log.debug("Y range [%.4f, %.4f]; head threshold Y >= %.4f", y_min, y_max, y_threshold)
-
-    # Find faces where ALL three vertices are above the threshold → head
-    face_verts_y = verts[mesh.faces, 1]  # (F, 3)
-    head_face_mask = face_verts_y.min(axis=1) >= y_threshold
-    body_face_mask = ~head_face_mask
-
-    head_mesh = _submesh(mesh, head_face_mask)
-    body_mesh = _submesh(mesh, body_face_mask) if body_face_mask.any() else None
-    return head_mesh, body_mesh
-
-
-def _submesh(mesh: trimesh.Trimesh, face_mask: np.ndarray) -> trimesh.Trimesh:
-    """Extract faces selected by boolean *face_mask* into a new Trimesh."""
-    selected_faces = mesh.faces[face_mask]
-    used_vertex_indices = np.unique(selected_faces)
-    index_map = np.zeros(len(mesh.vertices), dtype=np.int64)
-    index_map[used_vertex_indices] = np.arange(len(used_vertex_indices))
-    new_verts = mesh.vertices[used_vertex_indices]
-    new_faces = index_map[selected_faces]
-    return trimesh.Trimesh(vertices=new_verts, faces=new_faces, process=False)

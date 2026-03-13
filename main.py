@@ -5,14 +5,20 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from rigger.aligner import align_icp
 from rigger.glb_writer import write_rigged_glb
 from rigger.separator import separate_head_body
-from rigger.transfer import BS_SKIN_PATH, claire_neutral_m, transfer_morph_targets
+from rigger.transfer import (
+    ARKIT_BLENDSHAPES,
+    BS_SKIN_PATH,
+    _claire_deltas_m,
+    claire_neutral_m,
+    transfer_morph_targets,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +36,9 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Key blendshapes that must have mean displacement > 1mm to pass validation.
+_KEY_BLENDSHAPES = ["jawOpen", "eyeBlinkLeft", "eyeBlinkRight", "mouthSmileLeft", "mouthSmileRight"]
 
 
 @app.on_event("startup")
@@ -53,6 +62,20 @@ async def startup_event() -> None:
             BS_SKIN_PATH,
             len(claire_neutral_m),
         )
+
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    """Report pipeline readiness and Claire data loading status."""
+    loaded = claire_neutral_m is not None
+    n_bs = len(_claire_deltas_m) if _claire_deltas_m else 0
+    return JSONResponse({
+        "status": "ok" if loaded else "degraded",
+        "bs_skin_loaded": loaded,
+        "claire_vertex_count": int(len(claire_neutral_m)) if loaded else None,
+        "blendshapes_loaded": n_bs,
+        "arkit_blendshapes_expected": 52,
+    })
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -86,13 +109,13 @@ async def rig(file: UploadFile = File(...)) -> FileResponse:
 
         try:
             log.info("Separating head and body meshes...")
-            head_mesh, body_mesh, _scene_meta = separate_head_body(input_path)
+            head_mesh, body_mesh, scene_meta = separate_head_body(input_path)
 
             log.info("Aligning head to Claire neutral via ICP...")
-            aligned_head = align_icp(head_mesh)
+            aligned_head, alignment_meta = align_icp(head_mesh)
 
             log.info("Transferring 52 ARKit morph targets...")
-            rigged_head, blendshapes = transfer_morph_targets(aligned_head)
+            rigged_head, blendshapes = transfer_morph_targets(aligned_head, alignment_meta)
 
             log.info("Writing rigged GLB with pygltflib morph-target accessors...")
             write_rigged_glb(
@@ -101,11 +124,29 @@ async def rig(file: UploadFile = File(...)) -> FileResponse:
                 blendshapes=blendshapes,
                 body_mesh=body_mesh,
                 output_path=output_path,
+                original_glb_bytes=glb_bytes,
+                original_head_name=scene_meta.get("original_head_name"),
             )
 
         except Exception as exc:
             log.exception("Pipeline failed: %s", exc)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        # ── Output validation ────────────────────────────────────────────────
+        log.info("=== Output validation ===")
+        all_pass = True
+        for name in _KEY_BLENDSHAPES:
+            delta = blendshapes.get(name, np.zeros((1, 3)))
+            mean_mag = float(np.linalg.norm(delta, axis=1).mean())
+            if mean_mag < 0.001:
+                log.warning("VALIDATION FAIL: %s mean=%.6fm < 0.001m", name, mean_mag)
+                all_pass = False
+            else:
+                log.info("VALIDATION OK:   %s mean=%.5fm", name, mean_mag)
+        if all_pass:
+            log.info("All key blendshapes passed validation (mean > 1mm).")
+        else:
+            log.warning("One or more key blendshapes failed validation — check alignment and scale.")
 
         # Copy output outside the TemporaryDirectory before it's cleaned up.
         final_path = Path(tempfile.mktemp(suffix=".glb"))
