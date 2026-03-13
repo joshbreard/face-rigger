@@ -42,7 +42,7 @@ def separate_head_body(
 
     if isinstance(scene_or_mesh, trimesh.Trimesh):
         log.info("GLB contained a single mesh (%d verts); treating as head.", len(scene_or_mesh.vertices))
-        return scene_or_mesh, None, {"original_head_name": None}
+        return scene_or_mesh, None, {"original_head_name": None, "body_parts": []}
 
     scene: trimesh.scene.Scene = scene_or_mesh
     scene_meta: dict[str, Any] = {"graph": scene.graph, "metadata": scene.metadata}
@@ -67,7 +67,7 @@ def separate_head_body(
 
     # ── Strategy 1: keyword match ────────────────────────────────────────────
     named_head: list[trimesh.Trimesh] = []
-    named_body: list[trimesh.Trimesh] = []
+    named_body_parts: list[tuple[str, trimesh.Trimesh]] = []
     head_name: str | None = None
 
     for name, geom in trimeshes.items():
@@ -76,11 +76,11 @@ def separate_head_body(
             named_head.append(geom)
             head_name = name
         else:
-            named_body.append(geom)
+            named_body_parts.append((name, geom))
 
     if named_head:
         head_mesh = _concat(named_head)
-        body_mesh = _concat(named_body) if named_body else None
+        body_mesh = _concat([g for _, g in named_body_parts]) if named_body_parts else None
         log.info(
             "Name-based split: head=%d verts, body=%s verts, head_name='%s'",
             len(head_mesh.vertices),
@@ -88,6 +88,7 @@ def separate_head_body(
             head_name,
         )
         scene_meta["original_head_name"] = head_name
+        scene_meta["body_parts"] = named_body_parts
         return head_mesh, body_mesh, scene_meta
 
     # ── Strategy 2: Y-centroid threshold fallback ────────────────────────────
@@ -122,11 +123,13 @@ def separate_head_body(
         head_name = head_candidates[0][0]
         head_mesh = _concat([g for _, g in head_candidates])
         body_mesh = _concat([g for _, g in body_candidates]) if body_candidates else None
+        scene_meta["body_parts"] = body_candidates
     else:
         log.warning("No mesh centroid above Y threshold; using full mesh as head.")
         head_mesh = full_mesh
         body_mesh = None
         head_name = all_names[0] if all_names else None
+        scene_meta["body_parts"] = []
 
     log.info(
         "Y-fallback split: head=%d verts, body=%s verts, head_name='%s'",

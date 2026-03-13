@@ -54,6 +54,8 @@ def write_rigged_glb(
     output_path: Path,
     original_glb_bytes: bytes | None = None,
     original_head_name: str | None = None,
+    head_alignment_meta: dict | None = None,
+    body_parts: "list[tuple[str, trimesh.Trimesh]] | None" = None,
 ) -> None:
     """Assemble and save a GLB with 52 ARKit morph targets on the head mesh.
 
@@ -62,10 +64,11 @@ def write_rigged_glb(
     head_verts : (N, 3) float array — rigged head vertex positions
     head_faces : (F, 3) int array  — triangle face indices
     blendshapes : name -> (N, 3) displacement arrays
-    body_mesh : body mesh passed through unchanged; None if whole model is head
+    body_mesh : fallback body mesh (used only when body_parts is None/empty)
     output_path : destination .glb path
     original_glb_bytes : raw bytes of the input GLB (for UV/material extraction)
     original_head_name : geometry node name used to locate the head primitive
+    body_parts : list of (name, trimesh) per body part; preferred over body_mesh
     """
     builder = _GLBBuilder()
 
@@ -150,24 +153,79 @@ def write_rigged_glb(
     )
 
     meshes: list[pygltflib.Mesh] = [head_mesh_gltf]
-    nodes: list[pygltflib.Node] = [pygltflib.Node(name="head", mesh=0)]
 
-    # ── Body mesh (pass-through) ─────────────────────────────────────────────
-    if body_mesh is not None:
-        bv_arr = np.asarray(body_mesh.vertices, dtype=np.float32)
-        bi_arr = np.asarray(body_mesh.faces, dtype=np.uint32).flatten()
-        a_bv = builder.add_vec3(bv_arr, target=pygltflib.ARRAY_BUFFER, with_bounds=True)
-        a_bi = builder.add_scalar_u32(bi_arr, target=pygltflib.ELEMENT_ARRAY_BUFFER)
-        body_prim = pygltflib.Primitive(
-            attributes=pygltflib.Attributes(POSITION=a_bv),
-            indices=a_bi,
+    head_node = pygltflib.Node(name="head", mesh=0)
+    if head_alignment_meta is not None:
+        icp_centroid = hv.mean(axis=0)
+        log.info(
+            "Head centroid after ICP (Claire space): [%.4f, %.4f, %.4f]",
+            *icp_centroid,
         )
-        meshes.append(pygltflib.Mesh(name="body", primitives=[body_prim]))
-        nodes.append(pygltflib.Node(name="body", mesh=len(meshes) - 1))
+        src_centre = np.array(head_alignment_meta["source_centre"], dtype=np.float64)
+        log.info(
+            "Head centroid before ICP (original Meshy space): [%.4f, %.4f, %.4f]",
+            *src_centre,
+        )
+        head_node.matrix = _inverse_icp_matrix(head_alignment_meta)
+    nodes: list[pygltflib.Node] = [head_node]
+
+    # ── Body parts (pass-through with UVs/normals/materials) ─────────────────
+    _active_body_parts = body_parts if body_parts else (
+        [("body", body_mesh)] if body_mesh is not None else []
+    )
+    if _active_body_parts:
+        orig_binary_for_body = orig_gltf.binary_blob() if orig_gltf is not None else None
+        for part_name, part_mesh in _active_body_parts:
+            bv_arr = np.asarray(part_mesh.vertices, dtype=np.float32)
+            bi_arr = np.asarray(part_mesh.faces, dtype=np.uint32).flatten()
+            a_bv = builder.add_vec3(bv_arr, target=pygltflib.ARRAY_BUFFER, with_bounds=True)
+            a_bi = builder.add_scalar_u32(bi_arr, target=pygltflib.ELEMENT_ARRAY_BUFFER)
+
+            a_buv: int | None = None
+            a_bnorm: int | None = None
+            part_material_idx: int | None = None
+
+            if orig_gltf is not None and orig_binary_for_body is not None:
+                try:
+                    buv_bytes, bnorm_bytes, buv_count, bnorm_count, part_material_idx = \
+                        _extract_body_part_attributes(
+                            orig_gltf, orig_binary_for_body, part_name,
+                            len(bv_arr), original_head_name,
+                        )
+                    if buv_bytes and buv_count == len(bv_arr):
+                        a_buv = builder.add_raw(buv_bytes, buv_count, _FLOAT, "VEC2", pygltflib.ARRAY_BUFFER)
+                        log.info("Body part '%s': copied %d UV verts.", part_name, buv_count)
+                    elif buv_bytes:
+                        log.warning(
+                            "Body part '%s' UV count mismatch (UV=%d, verts=%d); skipping UVs.",
+                            part_name, buv_count, len(bv_arr),
+                        )
+                    if bnorm_bytes and bnorm_count == len(bv_arr):
+                        a_bnorm = builder.add_raw(bnorm_bytes, bnorm_count, _FLOAT, "VEC3", pygltflib.ARRAY_BUFFER)
+                        log.info("Body part '%s': copied %d normals.", part_name, bnorm_count)
+                    elif bnorm_bytes:
+                        log.warning(
+                            "Body part '%s' normal count mismatch (normals=%d, verts=%d); skipping normals.",
+                            part_name, bnorm_count, len(bv_arr),
+                        )
+                except Exception as exc:
+                    log.warning("Could not extract body part '%s' attributes: %s", part_name, exc)
+
+            body_prim_attrs = pygltflib.Attributes(POSITION=a_bv)
+            if a_buv is not None:
+                body_prim_attrs.TEXCOORD_0 = a_buv
+            if a_bnorm is not None:
+                body_prim_attrs.NORMAL = a_bnorm
+
+            body_prim = pygltflib.Primitive(
+                attributes=body_prim_attrs,
+                indices=a_bi,
+                material=part_material_idx,
+            )
+            meshes.append(pygltflib.Mesh(name=part_name, primitives=[body_prim]))
+            nodes.append(pygltflib.Node(name=part_name, mesh=len(meshes) - 1))
 
     # ── Assemble GLTF ────────────────────────────────────────────────────────
-    binary_blob = builder.binary_blob()
-
     gltf = pygltflib.GLTF2(
         asset=pygltflib.Asset(version="2.0", generator="face-rigger"),
         scene=0,
@@ -176,7 +234,7 @@ def write_rigged_glb(
         meshes=meshes,
         accessors=builder.accessors,
         bufferViews=builder.buffer_views,
-        buffers=[pygltflib.Buffer(byteLength=len(binary_blob))],
+        buffers=[pygltflib.Buffer(byteLength=0)],
     )
 
     # Copy materials/textures/images/samplers from original verbatim.
@@ -188,12 +246,14 @@ def write_rigged_glb(
         if orig_gltf.samplers:
             gltf.samplers = orig_gltf.samplers
         if orig_gltf.images:
-            # Re-embed images: shift bufferView indices to account for our new BVs,
-            # and update byte offsets to point into our new binary blob.
+            # Re-embed images into the builder so their bytes are part of the blob.
             gltf.images = _rebase_images(
                 orig_gltf, original_glb_bytes, builder, gltf
             )
 
+    # Capture binary blob AFTER all chunks (including images) have been added.
+    binary_blob = builder.binary_blob()
+    gltf.buffers[0].byteLength = len(binary_blob)
     gltf.set_binary_blob(binary_blob)
 
     log.info(
@@ -244,6 +304,76 @@ def _extract_head_attributes(
         normal_bytes, normal_count = _read_accessor_bytes(orig_gltf, orig_binary, attrs.NORMAL)
 
     return orig_gltf, uv_bytes, normal_bytes, uv_count, normal_count, material_idx
+
+
+def _extract_body_part_attributes(
+    orig_gltf: pygltflib.GLTF2,
+    orig_binary: bytes,
+    part_name: str,
+    expected_vert_count: int,
+    head_name: str | None,
+) -> tuple:
+    """Extract UV/normal bytes and material index for a single body part.
+
+    Finds the GLTF mesh matching *part_name* (excluding the head mesh), then
+    reads TEXCOORD_0 and NORMAL from its first primitive.
+
+    Returns (uv_bytes, normal_bytes, uv_count, normal_count, material_idx).
+    """
+    def _is_head_mesh(mesh_name: str | None) -> bool:
+        if not mesh_name or not head_name:
+            return False
+        return head_name.lower() in mesh_name.lower() or mesh_name.lower() in head_name.lower()
+
+    # Try name match first (case-insensitive substring).
+    prim = None
+    for mesh in orig_gltf.meshes:
+        if _is_head_mesh(mesh.name):
+            continue
+        if mesh.name and (
+            part_name.lower() in mesh.name.lower()
+            or mesh.name.lower() in part_name.lower()
+        ):
+            if mesh.primitives:
+                prim = mesh.primitives[0]
+                log.info("Body part primitive found by name: mesh='%s' for part='%s'", mesh.name, part_name)
+                break
+
+    if prim is None:
+        # Fallback: closest vertex count among non-head meshes.
+        best_prim = None
+        best_diff = float("inf")
+        for mesh in orig_gltf.meshes:
+            if _is_head_mesh(mesh.name):
+                continue
+            for p in mesh.primitives or []:
+                if p.attributes.POSITION is None:
+                    continue
+                acc = orig_gltf.accessors[p.attributes.POSITION]
+                diff = abs(acc.count - expected_vert_count)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_prim = p
+        if best_prim is None:
+            log.warning("Could not locate primitive for body part '%s'.", part_name)
+            return None, None, 0, 0, None
+        prim = best_prim
+        log.info(
+            "Body part '%s' primitive found by vertex count proximity (expected=%d, diff=%d).",
+            part_name, expected_vert_count, best_diff,
+        )
+
+    uv_bytes: bytes | None = None
+    uv_count: int = 0
+    normal_bytes: bytes | None = None
+    normal_count: int = 0
+
+    if prim.attributes.TEXCOORD_0 is not None:
+        uv_bytes, uv_count = _read_accessor_bytes(orig_gltf, orig_binary, prim.attributes.TEXCOORD_0)
+    if prim.attributes.NORMAL is not None:
+        normal_bytes, normal_count = _read_accessor_bytes(orig_gltf, orig_binary, prim.attributes.NORMAL)
+
+    return uv_bytes, normal_bytes, uv_count, normal_count, prim.material
 
 
 def _find_head_primitive(
@@ -339,10 +469,6 @@ def _rebase_images(
 
         # Append image bytes to builder (no target for image data).
         new_bv_idx = builder._add_chunk(raw_img, target=None)
-        # Shift new_bv_idx by count already registered (images added after).
-        actual_bv_idx = len(new_gltf.bufferViews) + new_bv_idx
-        # Actually builder._add_chunk already appended to builder.buffer_views —
-        # the index is absolute within builder.buffer_views.
         new_img = pygltflib.Image(
             mimeType=img.mimeType,
             bufferView=new_bv_idx,
@@ -352,6 +478,37 @@ def _rebase_images(
         images_out.append(new_img)
 
     return images_out
+
+
+# ---------------------------------------------------------------------------
+# ICP inverse transform helper
+# ---------------------------------------------------------------------------
+
+def _inverse_icp_matrix(alignment_meta: dict) -> list[float]:
+    """Return the inverse ICP transform as a GLTF column-major flat list.
+
+    The forward ICP pipeline is:
+        v_aligned = T @ (scale * (v_orig - src_centre))
+
+    So the inverse (placing aligned head verts back into Meshy world space) is:
+        v_orig = (1/scale) * T_inv @ v_aligned + src_centre
+
+    As a 4x4 matrix M = Translate(src_centre) @ Scale(1/scale) @ T_inv.
+    GLTF matrices are column-major (M.T flattened).
+    """
+    src_centre = np.array(alignment_meta["source_centre"], dtype=np.float64)
+    scale_factor = float(alignment_meta["scale_factor"])
+    T = np.array(alignment_meta["icp_transformation"], dtype=np.float64)
+
+    T_inv = np.linalg.inv(T)
+    inv_scale = 1.0 / scale_factor if scale_factor > 1e-8 else 1.0
+
+    scale_mat = np.diag([inv_scale, inv_scale, inv_scale, 1.0])
+    translate_mat = np.eye(4)
+    translate_mat[:3, 3] = src_centre
+
+    M = translate_mat @ scale_mat @ T_inv
+    return M.T.flatten().tolist()  # column-major for GLTF
 
 
 # ---------------------------------------------------------------------------
