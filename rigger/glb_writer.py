@@ -56,6 +56,8 @@ def write_rigged_glb(
     original_head_name: str | None = None,
     head_alignment_meta: dict | None = None,
     body_parts: "list[tuple[str, trimesh.Trimesh]] | None" = None,
+    head_vert_indices: "np.ndarray | None" = None,
+    body_vert_indices: "np.ndarray | None" = None,
 ) -> None:
     """Assemble and save a GLB with 52 ARKit morph targets on the head mesh.
 
@@ -90,6 +92,22 @@ def write_rigged_glb(
                 log.info("Extracted normal data from original GLB (%d bytes, %d verts).", len(orig_normals), orig_normal_count)
             if orig_material_idx is not None:
                 log.info("Head primitive material index: %d", orig_material_idx)
+
+            # Slice UVs/normals down to just the head vertices when the original
+            # GLB is a single merged mesh and head_vert_indices are provided.
+            if head_vert_indices is not None:
+                if orig_uvs and orig_uv_count != len(head_verts):
+                    uv_arr = np.frombuffer(orig_uvs, dtype=np.float32).reshape(-1, 2)
+                    uv_arr = uv_arr[head_vert_indices]
+                    orig_uvs = uv_arr.astype(np.float32).tobytes()
+                    orig_uv_count = len(head_vert_indices)
+                    log.info("Sliced head UVs to %d verts using head_vert_indices.", orig_uv_count)
+                if orig_normals and orig_normal_count != len(head_verts):
+                    norm_arr = np.frombuffer(orig_normals, dtype=np.float32).reshape(-1, 3)
+                    norm_arr = norm_arr[head_vert_indices]
+                    orig_normals = norm_arr.astype(np.float32).tobytes()
+                    orig_normal_count = len(head_vert_indices)
+                    log.info("Sliced head normals to %d verts using head_vert_indices.", orig_normal_count)
         except Exception as exc:
             log.warning("Could not extract attributes from original GLB (%s); output will have no UVs/materials.", exc)
 
@@ -192,6 +210,22 @@ def write_rigged_glb(
                             orig_gltf, orig_binary_for_body, part_name,
                             len(bv_arr), original_head_name,
                         )
+
+                    # Slice to body vertices when original GLB is a single merged mesh.
+                    if body_vert_indices is not None:
+                        if buv_bytes and buv_count != len(bv_arr):
+                            buv_arr = np.frombuffer(buv_bytes, dtype=np.float32).reshape(-1, 2)
+                            buv_arr = buv_arr[body_vert_indices]
+                            buv_bytes = buv_arr.astype(np.float32).tobytes()
+                            buv_count = len(body_vert_indices)
+                            log.info("Body part '%s': sliced UVs to %d verts.", part_name, buv_count)
+                        if bnorm_bytes and bnorm_count != len(bv_arr):
+                            bnorm_arr = np.frombuffer(bnorm_bytes, dtype=np.float32).reshape(-1, 3)
+                            bnorm_arr = bnorm_arr[body_vert_indices]
+                            bnorm_bytes = bnorm_arr.astype(np.float32).tobytes()
+                            bnorm_count = len(body_vert_indices)
+                            log.info("Body part '%s': sliced normals to %d verts.", part_name, bnorm_count)
+
                     if buv_bytes and buv_count == len(bv_arr):
                         a_buv = builder.add_raw(buv_bytes, buv_count, _FLOAT, "VEC2", pygltflib.ARRAY_BUFFER)
                         log.info("Body part '%s': copied %d UV verts.", part_name, buv_count)

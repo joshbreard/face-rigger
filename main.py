@@ -131,6 +131,8 @@ async def rig(file: UploadFile = File(...)) -> FileResponse:
                 original_head_name=scene_meta.get("original_head_name"),
                 head_alignment_meta=alignment_meta,
                 body_parts=scene_meta.get("body_parts"),
+                head_vert_indices=scene_meta.get("head_vert_indices"),
+                body_vert_indices=scene_meta.get("body_vert_indices"),
             )
 
         except Exception as exc:

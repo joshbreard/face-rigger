@@ -25,6 +25,7 @@ import trimesh
 import trimesh.convex
 import trimesh.proximity
 import trimesh.triangles
+from scipy.linalg import lu_factor, lu_solve
 from scipy.spatial import KDTree
 
 log = logging.getLogger(__name__)
@@ -276,6 +277,213 @@ def _transfer_idw(
     return (claire_disp[idxs] * w[:, :, np.newaxis]).sum(axis=1)  # (N, 3)
 
 
+# Mediapipe landmark index -> canonical Claire anchor position (metres, centred).
+# Covers 8 anatomical control points across the face.
+_LANDMARK_TO_CLAIRE_POS: dict[int, tuple[float, float, float]] = {
+    152: (0.0,    -0.050,  0.020),   # jaw tip
+    33:  (-0.030,  0.020,  0.040),   # left eye centre
+    263: ( 0.030,  0.020,  0.040),   # right eye centre
+    4:   ( 0.0,   -0.005,  0.055),   # nose tip
+    61:  (-0.025, -0.025,  0.040),   # left mouth corner
+    291: ( 0.025, -0.025,  0.040),   # right mouth corner
+    70:  (-0.030,  0.040,  0.030),   # left brow peak
+    300: ( 0.030,  0.040,  0.030),   # right brow peak
+}
+
+
+def _detect_landmarks(mesh_verts: np.ndarray, image_size: int = 512) -> np.ndarray | None:
+    """Project *mesh_verts* to a frontal 2D image and run mediapipe FaceLandmarker.
+
+    Parameters
+    ----------
+    mesh_verts : (N, 3) array in ICP-aligned metres, centred at origin.
+
+    Returns
+    -------
+    (478, 2) pixel coords of the detected landmarks, or None on failure.
+    """
+    try:
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision as mp_vision
+    except ImportError:
+        return None
+
+    MODEL_PATH = Path("assets/face_landmarker.task")
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing model file: {MODEL_PATH}. "
+            "Run: curl -L 'https://storage.googleapis.com/mediapipe-models/"
+            "face_landmarker/face_landmarker/float16/1/face_landmarker.task'"
+            " -o assets/face_landmarker.task"
+        )
+
+    x = mesh_verts[:, 0]
+    y = mesh_verts[:, 1]
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = float(y.min()), float(y.max())
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+
+    if x_range < 1e-9 or y_range < 1e-9:
+        log.warning("Landmark detection: degenerate vertex XY range — skipping.")
+        return None
+
+    # Map world XY -> pixel coords (flip Y so +Y = up in world = up in image).
+    px = ((x - x_min) / x_range * (image_size - 1)).astype(np.int32)
+    py = ((1.0 - (y - y_min) / y_range) * (image_size - 1)).astype(np.int32)
+    px = np.clip(px, 0, image_size - 1)
+    py = np.clip(py, 0, image_size - 1)
+
+    img = np.zeros((image_size, image_size), dtype=np.uint8)
+    # Draw each vertex as a filled circle of radius 2px using vectorised ops.
+    for dy in range(-2, 3):
+        for dx in range(-2, 3):
+            if dx * dx + dy * dy <= 4:
+                img[np.clip(py + dy, 0, image_size - 1),
+                    np.clip(px + dx, 0, image_size - 1)] = 200
+
+    img_rgb = np.stack([img, img, img], axis=-1)  # Tasks API needs HxWx3 SRGB
+
+    BaseOptions = mp_python.BaseOptions
+    FaceLandmarker = mp_vision.FaceLandmarker
+    FaceLandmarkerOptions = mp_vision.FaceLandmarkerOptions
+    VisionRunningMode = mp_vision.RunningMode
+
+    options = FaceLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
+        running_mode=VisionRunningMode.IMAGE,
+        num_faces=1,
+    )
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+
+    with FaceLandmarker.create_from_options(options) as landmarker:
+        result = landmarker.detect(mp_image)
+
+    if not result.face_landmarks:
+        log.warning("Landmark detection: no face detected in projected vertex image.")
+        return None
+
+    lms = result.face_landmarks[0]
+    if len(lms) < 478:
+        log.warning("Landmark detection: expected 478 landmarks, got %d.", len(lms))
+        return None
+
+    # Landmark .x / .y are normalised [0, 1]; multiply by image_size for pixels.
+    coords = np.array([[lm.x * image_size, lm.y * image_size] for lm in lms],
+                      dtype=np.float64)  # (478, 2)
+    return coords
+
+
+def _build_landmark_anchors(
+    meshy_verts: np.ndarray,
+    landmark_pixels: np.ndarray,
+    image_size: int = 512,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map detected landmark pixels to Meshy vertex indices and Claire anchor indices.
+
+    Parameters
+    ----------
+    meshy_verts : (N, 3) Meshy head vertices (metres, centred).
+    landmark_pixels : (478, 2) pixel coords from _detect_landmarks.
+
+    Returns
+    -------
+    meshy_anchor_indices : (K,) int  — index into meshy_verts per control point
+    claire_anchor_indices : (K,) int — index into claire_neutral_m per control point
+    """
+    x = meshy_verts[:, 0]
+    y = meshy_verts[:, 1]
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = float(y.min()), float(y.max())
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+
+    # KDTree on Meshy XY projection for fast nearest-vertex lookup.
+    meshy_xy_tree = KDTree(meshy_verts[:, :2])
+
+    meshy_anchor_indices: list[int] = []
+    claire_anchor_indices: list[int] = []
+
+    for lm_idx, claire_pos in _LANDMARK_TO_CLAIRE_POS.items():
+        px, py_pix = landmark_pixels[lm_idx]
+
+        # Unnormalise pixel -> world XY (inverse of _detect_landmarks mapping).
+        world_x = px / (image_size - 1) * x_range + x_min
+        world_y = (1.0 - py_pix / (image_size - 1)) * y_range + y_min
+
+        _, nearest_meshy = meshy_xy_tree.query([world_x, world_y])
+        meshy_anchor_indices.append(int(nearest_meshy))
+
+        # Nearest Claire frontal vertex to the canonical anatomical position.
+        _, local_idx = _claire_frontal_tree.query(np.array(claire_pos))
+        claire_anchor_indices.append(int(_claire_frontal_indices[local_idx]))
+
+    return (
+        np.array(meshy_anchor_indices, dtype=np.int64),
+        np.array(claire_anchor_indices, dtype=np.int64),
+    )
+
+
+def _transfer_landmark_anchored(
+    target_verts: np.ndarray,
+    claire_disp: np.ndarray,
+    meshy_anchor_indices: np.ndarray,
+    claire_anchor_indices: np.ndarray,
+    idw_tree: KDTree,
+) -> np.ndarray:
+    """RBF (thin-plate spline) displacement transfer anchored at landmarks.
+
+    Uses phi(r) = r^2 * log(r + 1e-10).  Weights are solved once via LU
+    factorisation of Phi; the same factorisation is reused for all 3 spatial
+    components (x, y, z).  Vertices further than 0.08 m from any anchor are
+    blended towards an IDW result.
+
+    Parameters
+    ----------
+    target_verts : (N, 3)
+    claire_disp  : (V_claire, 3)
+    meshy_anchor_indices  : (K,)
+    claire_anchor_indices : (K,)
+    idw_tree     : KDTree on all claire_neutral_m
+
+    Returns
+    -------
+    (N, 3) displacement array.
+    """
+    meshy_anchors = target_verts[meshy_anchor_indices]  # (K, 3)
+    K = len(meshy_anchors)
+
+    # Build K×K RBF matrix.
+    diff_aa = meshy_anchors[:, np.newaxis, :] - meshy_anchors[np.newaxis, :, :]  # (K,K,3)
+    r_aa = np.linalg.norm(diff_aa, axis=2)  # (K, K)
+    Phi = r_aa ** 2 * np.log(r_aa + 1e-10)  # thin-plate spline kernel
+
+    rhs = claire_disp[claire_anchor_indices]  # (K, 3)
+
+    # Factorise once, solve for x / y / z independently.
+    lu, piv = lu_factor(Phi)
+    w = lu_solve((lu, piv), rhs)  # (K, 3)
+
+    # Evaluate at every target vertex.
+    diff_ta = target_verts[:, np.newaxis, :] - meshy_anchors[np.newaxis, :, :]  # (N,K,3)
+    r_ta = np.linalg.norm(diff_ta, axis=2)  # (N, K)
+    D = r_ta ** 2 * np.log(r_ta + 1e-10)   # (N, K)
+    rbf_disp = D @ w  # (N, 3)
+
+    # IDW fallback for vertices far from any anchor.
+    idw_disp = _transfer_idw(target_verts, claire_disp, idw_tree, k=4)
+
+    anchor_tree = KDTree(meshy_anchors)
+    d_anchor, _ = anchor_tree.query(target_verts)  # (N,)
+
+    # blend_weight = 1 (pure RBF) when d <= 0.08; decays exponentially beyond.
+    blend_weight = np.where(d_anchor > 0.08, np.exp(-d_anchor / 0.04), 1.0)
+    blend_weight = blend_weight[:, np.newaxis]  # (N, 1) for broadcasting
+
+    return blend_weight * rbf_disp + (1.0 - blend_weight) * idw_disp
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -312,24 +520,45 @@ def transfer_morph_targets(
         len(target_verts), *target_verts.mean(axis=0),
     )
 
+    # Full IDW tree (always built — used as landmark-RBF fallback and IDW path).
+    idw_tree_full = KDTree(claire_neutral_m)
+
+    # ── Try landmark detection ───────────────────────────────────────────────
+    _landmark_anchors = None
+    if _claire_frontal_tree is not None and _claire_frontal_indices is not None:
+        try:
+            import mediapipe  # noqa: F401 — presence check
+            import mediapipe.tasks  # noqa: F401 — ensure Tasks API is available
+            lm_pixels = _detect_landmarks(target_verts)
+            if lm_pixels is not None:
+                meshy_idx, claire_idx = _build_landmark_anchors(target_verts, lm_pixels)
+                _landmark_anchors = (meshy_idx, claire_idx)
+                log.info("LANDMARK anchors built: %d control points.", len(meshy_idx))
+            else:
+                log.warning("Landmark detection failed; falling back to barycentric/IDW.")
+        except ImportError:
+            log.info("mediapipe not installed; using barycentric/IDW transfer.")
+
+    # ── Prepare barycentric / IDW structures (only when landmark unavailable) ─
     use_barycentric = _claire_hull is not None
     mapping = None
-    idw_tree = None
+    idw_tree = None  # used only in pure-IDW path
 
-    if use_barycentric:
-        log.info(
-            "Transfer method: BARYCENTRIC (frontal hull %d tris, %d verts).",
-            len(_claire_hull.faces), len(_claire_hull.vertices),
-        )
-        log.info("Precomputing barycentric mapping for %d target vertices...", len(target_verts))
-        mapping = _precompute_bary_mapping(target_verts)
-    else:
-        log.info(
-            "Transfer method: IDW k=4 (barycentric hull unavailable). "
-            "Building KD-tree on %d Claire vertices...",
-            len(claire_neutral_m),
-        )
-        idw_tree = KDTree(claire_neutral_m)
+    if _landmark_anchors is None:
+        if use_barycentric:
+            log.info(
+                "Transfer method: BARYCENTRIC (frontal hull %d tris, %d verts).",
+                len(_claire_hull.faces), len(_claire_hull.vertices),
+            )
+            log.info("Precomputing barycentric mapping for %d target vertices...", len(target_verts))
+            mapping = _precompute_bary_mapping(target_verts)
+        else:
+            log.info(
+                "Transfer method: IDW k=4 (barycentric hull unavailable). "
+                "Reusing full KD-tree on %d Claire vertices.",
+                len(claire_neutral_m),
+            )
+            idw_tree = idw_tree_full
 
     # Reference Claire jawOpen magnitude for scale mismatch detection.
     jaw_claire_disp = _claire_deltas_m.get("jawOpen", np.zeros_like(claire_neutral_m))
@@ -343,7 +572,11 @@ def transfer_morph_targets(
     for name in ARKIT_BLENDSHAPES:
         claire_disp = _claire_deltas_m.get(name, np.zeros_like(claire_neutral_m))
 
-        if use_barycentric:
+        if _landmark_anchors is not None:
+            target_disp = _transfer_landmark_anchored(
+                target_verts, claire_disp, *_landmark_anchors, idw_tree_full
+            )
+        elif use_barycentric:
             target_disp = _transfer_barycentric_with_mapping(claire_disp, mapping)
         else:
             target_disp = _transfer_idw(target_verts, claire_disp, idw_tree)
@@ -377,10 +610,11 @@ def transfer_morph_targets(
             )
             target_morph_targets = {k: v * ratio for k, v in target_morph_targets.items()}
 
-    log.info(
-        "All 52 morph targets transferred via %s.",
-        "barycentric" if use_barycentric else "IDW k=4",
+    method_name = (
+        "landmark-anchored RBF" if _landmark_anchors is not None
+        else ("barycentric" if use_barycentric else "IDW k=4")
     )
+    log.info("All 52 morph targets transferred via %s.", method_name)
 
     rigged = trimesh.Trimesh(
         vertices=target_verts.copy(),

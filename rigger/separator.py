@@ -157,6 +157,8 @@ def separate_head_body(
         )
         scene_meta["original_head_name"] = single_name
         scene_meta["body_parts"] = [(single_name + "_body", body_mesh)] if body_mesh else []
+        scene_meta["head_vert_indices"] = head_vert_indices
+        scene_meta["body_vert_indices"] = body_vert_indices
         return head_mesh, body_mesh, scene_meta
 
     # ── Multi-mesh GLB: per-mesh centroid loop ────────────────────────────────
