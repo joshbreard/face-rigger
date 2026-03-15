@@ -627,14 +627,15 @@ def transfer_morph_targets(
     # approach fails: jawOpen displaces vertices all the way up to the cheeks,
     # so "max Y of significant jaw verts" lands at cheek level — far above the
     # mouth.  The correct boundary is simpler: the nose tip Y IS the cutoff.
-    # Anything at or above the nose (nose, cheeks, eyes, brows) must not move
-    # with jaw blendshapes.  We add a small upward buffer (+0.01 m / 1 cm) so
-    # the nose tip vertex itself is included in the zeroed set.
+    # Anything at or above the nose base must not move with jaw blendshapes.
+    # We subtract 5 mm (nose_y - 0.005) so the cutoff sits just below the nose
+    # tip, fully suppressing the nose and all geometry above it.
     #
     # Sanity check from this run's data:
-    #   nose_y ≈ -0.025 m  (nose tip, correctly found as max-Z centre vertex)
-    #   Claire-derived value was ≈ +0.042 m  ← above the nose → nose moves → WRONG
-    _jaw_cutoff_y = _nose_y + 0.01
+    #   nose_y ≈ -0.0147 m  (nose tip, correctly found as max-Z centre vertex)
+    #   Old value (nose_y + 0.010) ≈ -0.0047 m  ← too high, nose still moved
+    #   New value (nose_y - 0.005) ≈ -0.0197 m  ← below nose base → correct
+    _jaw_cutoff_y = _nose_y - 0.005
 
     # Lower lip / upper-mouth boundary.
     # Estimate chin as the 5th-percentile Y (lowest real face geometry, not outliers).
@@ -648,7 +649,7 @@ def transfer_morph_targets(
 
     log.info(
         "Anatomical mask thresholds — "
-        "jaw_cutoff_y=%.4fm (nose_y=%.4fm + 10mm)  "
+        "jaw_cutoff_y=%.4fm (nose_y=%.4fm - 5mm)  "
         "lower_lip_y=%.4fm  nose_base_y=%.4fm  "
         "chin_y(p5)=%.4fm  nose_to_chin=%.4fm  face_height=%.4fm",
         _jaw_cutoff_y, _nose_y, _lower_lip_y, _nose_base_y,
@@ -672,14 +673,28 @@ def transfer_morph_targets(
     })
 
     # Boolean vertex masks (computed once, reused across blendshapes).
-    _above_jaw_cutoff = _y_verts > _jaw_cutoff_y   # at/above nose → frozen for jaw shapes
+    _above_jaw_cutoff = _y_verts > _jaw_cutoff_y   # at/above cutoff → frozen for jaw shapes
     _below_lip_mask   = _y_verts < _lower_lip_y    # vertices below lower lip
     _below_nose_base  = _y_verts < _nose_base_y    # vertices below nose base
 
+    # Soft falloff weights for jawOpen only: linear ramp in the 15 mm zone
+    # just below jaw_cutoff_y.  Outside the blend zone the weight is either
+    # 0 (above cutoff, fully suppressed) or 1 (below cutoff-15mm, full motion).
+    # Shape: (N,) float32, values in [0, 1].
+    _JAW_BLEND_MM   = 0.015                        # 15 mm blend zone
+    _jaw_blend_low  = _jaw_cutoff_y - _JAW_BLEND_MM
+    _jaw_open_weights = np.clip(
+        (_jaw_cutoff_y - _y_verts) / _JAW_BLEND_MM,
+        0.0, 1.0,
+    ).astype(np.float32)                           # 0 at cutoff, 1 at cutoff-15mm
+
     log.info(
         "Vertex mask counts — above_jaw_cutoff (Y>%.4f): %d/%d  "
+        "in_jaw_blend_zone (%.4f<Y<=%.4f): %d/%d  "
         "below_lower_lip (Y<%.4f): %d/%d  below_nose_base (Y<%.4f): %d/%d",
         _jaw_cutoff_y, int(_above_jaw_cutoff.sum()), len(target_verts),
+        _jaw_blend_low, _jaw_cutoff_y,
+        int(((_y_verts > _jaw_blend_low) & (_y_verts <= _jaw_cutoff_y)).sum()), len(target_verts),
         _lower_lip_y,  int(_below_lip_mask.sum()),   len(target_verts),
         _nose_base_y,  int(_below_nose_base.sum()),  len(target_verts),
     )
@@ -718,15 +733,34 @@ def transfer_morph_targets(
         if name in _MASK_LOWER_JAW:
             n_masked        = int(_above_jaw_cutoff.sum())
             n_active_masked = int((_above_jaw_cutoff & _active).sum())
-            if n_masked > 0:
-                target_disp = target_disp.copy()
-                target_disp[_above_jaw_cutoff] = 0.0
-            log.info(
-                "Mask [jaw/lower-mouth] %-30s  "
-                "zeroed %d/%d verts above jaw_cutoff_y=%.4fm  "
-                "(%d had |disp|>0.1mm — these were suppressed)",
-                name, n_masked, len(target_verts), _jaw_cutoff_y, n_active_masked,
-            )
+            target_disp = target_disp.copy()
+            if name == "jawOpen":
+                # Soft falloff in the 15 mm blend zone below the cutoff to
+                # avoid a visible seam at the philtrum/upper-lip boundary.
+                # Vertices above the cutoff are still hard-zeroed.
+                target_disp *= _jaw_open_weights[:, np.newaxis]
+                n_blended = int(((_jaw_open_weights > 0.0) & (_jaw_open_weights < 1.0)).sum())
+                n_blended_active = int(
+                    ((_jaw_open_weights > 0.0) & (_jaw_open_weights < 1.0) & _active).sum()
+                )
+                log.info(
+                    "Mask [jawOpen]         %-30s  "
+                    "zeroed %d/%d verts above jaw_cutoff_y=%.4fm  "
+                    "blended %d/%d verts in blend zone (%.4f–%.4fm)  "
+                    "(%d zeroed, %d blended had |disp|>0.1mm)",
+                    name, n_masked, len(target_verts), _jaw_cutoff_y,
+                    n_blended, len(target_verts), _jaw_blend_low, _jaw_cutoff_y,
+                    n_active_masked, n_blended_active,
+                )
+            else:
+                if n_masked > 0:
+                    target_disp[_above_jaw_cutoff] = 0.0
+                log.info(
+                    "Mask [jaw/lower-mouth] %-30s  "
+                    "zeroed %d/%d verts above jaw_cutoff_y=%.4fm  "
+                    "(%d had |disp|>0.1mm — these were suppressed)",
+                    name, n_masked, len(target_verts), _jaw_cutoff_y, n_active_masked,
+                )
         elif name in _MASK_UPPER_MOUTH:
             n_masked        = int(_below_lip_mask.sum())
             n_active_masked = int((_below_lip_mask & _active).sum())
