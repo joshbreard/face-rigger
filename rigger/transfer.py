@@ -889,6 +889,118 @@ def transfer_morph_targets(
             )
             target_morph_targets = {k: v * ratio for k, v in target_morph_targets.items()}
 
+    # ── Post-RBF local rescaling for eye and smile shapes ───────────────────────
+    # For blendshapes whose transfer is known to under/over-shoot in a localised
+    # anatomical region, rebalance by matching the Claire source 95th-percentile
+    # local displacement magnitude.
+    _RESCALE_EYE_PREFIXES = ("eyeBlink", "eyeLook", "eyeWide", "eyeSquint")
+    _RESCALE_SMILE_SHAPES = frozenset({"mouthSmileLeft", "mouthSmileRight"})
+    _RESCALE_RADIUS_M = 0.012  # 12 mm neighbourhood radius
+
+    # Landmark index order within _LANDMARK_TO_CLAIRE_POS (dict-insertion order, Python 3.7+).
+    _lm_key_list = list(_LANDMARK_TO_CLAIRE_POS.keys())
+    # [152, 33, 263, 4, 61, 291, 70, 300]
+
+    for _rname in ARKIT_BLENDSHAPES:
+        if _rname not in target_morph_targets:
+            continue
+
+        _is_eye = any(_rname.startswith(p) for p in _RESCALE_EYE_PREFIXES)
+        _is_smile = _rname in _RESCALE_SMILE_SHAPES
+        if not (_is_eye or _is_smile):
+            continue
+
+        _is_left = _rname.endswith("Left")
+        if _is_eye:
+            _lm_idx = 33 if _is_left else 263   # left/right eye centre
+        else:
+            _lm_idx = 61 if _is_left else 291   # left/right mouth corner
+
+        # Anchor position in Claire space (canonical).
+        _anchor_claire = np.array(_LANDMARK_TO_CLAIRE_POS[_lm_idx])
+
+        # Anchor position in target space: use detected landmark vertex if available,
+        # otherwise fall back to the same canonical position (meshes are ICP-aligned).
+        if _landmark_anchors is not None:
+            _k = _lm_key_list.index(_lm_idx)
+            _anchor_target = target_verts[_landmark_anchors[0][_k]]
+        else:
+            _anchor_target = _anchor_claire.copy()
+
+        # Local vertex masks (within 12 mm of anchor).
+        _dists_t = np.linalg.norm(target_verts - _anchor_target, axis=1)
+        _local_t  = _dists_t <= _RESCALE_RADIUS_M
+        _dists_c  = np.linalg.norm(claire_neutral_m - _anchor_claire, axis=1)
+        _local_c  = _dists_c <= _RESCALE_RADIUS_M
+
+        _n_local_t = int(_local_t.sum())
+        _n_local_c = int(_local_c.sum())
+
+        if _n_local_t < 3 or _n_local_c < 3:
+            log.warning(
+                "LocalRescale [%s]: too few local verts (target=%d, claire=%d) within %.0fmm — skipping.",
+                _rname, _n_local_t, _n_local_c, _RESCALE_RADIUS_M * 1000,
+            )
+            continue
+
+        # Claire source 95th-percentile local displacement magnitude.
+        _claire_disp_r = _claire_deltas_m.get(_rname, np.zeros_like(claire_neutral_m))
+        _claire_local_mags = np.linalg.norm(_claire_disp_r[_local_c], axis=1)
+        _claire_p95 = float(np.percentile(_claire_local_mags, 95))
+
+        # Transferred 95th-percentile local displacement magnitude.
+        _xfer_disp = target_morph_targets[_rname]
+        _xfer_local_mags = np.linalg.norm(_xfer_disp[_local_t], axis=1)
+        _xfer_p95 = float(np.percentile(_xfer_local_mags, 95))
+
+        if _claire_p95 < 1e-6 or _xfer_p95 < 1e-6:
+            log.info(
+                "LocalRescale [%s]: p95 near-zero (claire=%.4fmm, xfer=%.4fmm) — skipping.",
+                _rname, _claire_p95 * 1000, _xfer_p95 * 1000,
+            )
+            continue
+
+        _ratio = _claire_p95 / _xfer_p95
+        if 0.5 <= _ratio <= 2.0:
+            log.info(
+                "LocalRescale [%s]: ratio=%.3f within [0.5, 2.0] — no rescale needed "
+                "(claire_p95=%.3fmm, xfer_p95=%.3fmm, local_t=%d, local_c=%d).",
+                _rname, _ratio, _claire_p95 * 1000, _xfer_p95 * 1000, _n_local_t, _n_local_c,
+            )
+            continue
+
+        _ratio_clamped = float(np.clip(_ratio, 0.0, 10.0))
+        log.info(
+            "LocalRescale [%s]: ratio=%.3f → clamped=%.3f  "
+            "claire_p95=%.3fmm  xfer_p95=%.3fmm  local_t=%d  local_c=%d  APPLYING.",
+            _rname, _ratio, _ratio_clamped,
+            _claire_p95 * 1000, _xfer_p95 * 1000, _n_local_t, _n_local_c,
+        )
+        target_morph_targets[_rname] = _xfer_disp * _ratio_clamped
+
+    # ── Shape-specific displacement validation (post-rescaling) ─────────────────
+    for _vname, _thresh_m, _label in [
+        ("mouthSmileLeft",  0.003, "smile"),
+        ("mouthSmileRight", 0.003, "smile"),
+        ("eyeBlinkLeft",    0.001, "eyeBlink"),
+        ("eyeBlinkRight",   0.001, "eyeBlink"),
+    ]:
+        _vdisp = target_morph_targets.get(_vname)
+        if _vdisp is None:
+            continue
+        _vmean = float(np.linalg.norm(_vdisp, axis=1).mean())
+        if _vmean < _thresh_m:
+            log.warning(
+                "VALIDATION [%s] mean=%.4fmm < %.1fmm threshold — "
+                "transfer may be insufficient for this %s shape.",
+                _vname, _vmean * 1000, _thresh_m * 1000, _label,
+            )
+        else:
+            log.info(
+                "Validation [%s]: mean=%.4fmm ✓ (threshold %.1fmm).",
+                _vname, _vmean * 1000, _thresh_m * 1000,
+            )
+
     # ── Upper-face anchoring: remove global translation from lower-face shapes ──
     # These blendshapes should deform only the jaw / mouth / lower cheek region.
     # Any displacement appearing on the upper face (eyes, brows, forehead) is
