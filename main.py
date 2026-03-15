@@ -18,6 +18,7 @@ from starlette.background import BackgroundTask
 
 from rigger.aligner import align_icp
 from rigger.glb_writer import patch_glb_add_morph_targets
+from rigger.mouth_slit import cut_mouth_slit
 from rigger.separator import _find_jaw_cutoff_geometric, separate_head_body
 from rigger.transfer import (
     ARKIT_BLENDSHAPES,
@@ -210,6 +211,9 @@ async def rig(
             head_mesh, body_mesh, scene_meta = separate_head_body(
                 input_path, y_back=y_back, y_front=y_front,
             )
+
+            log.info("Cutting mouth slit (topological upper/lower lip separation)...")
+            head_mesh = cut_mouth_slit(head_mesh)
 
             log.info("Aligning head to Claire neutral via ICP...")
             aligned_head, alignment_meta = align_icp(head_mesh)

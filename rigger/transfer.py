@@ -618,6 +618,61 @@ def transfer_morph_targets(
             )
             target_morph_targets = {k: v * ratio for k, v in target_morph_targets.items()}
 
+    # ── Upper-face anchoring: remove global translation from lower-face shapes ──
+    # These blendshapes should deform only the jaw / mouth / lower cheek region.
+    # Any displacement appearing on the upper face (eyes, brows, forehead) is
+    # an artefact — either a rigid-body offset baked into the source data, or
+    # spatial-interpolation spread.  We cancel it by subtracting the mean
+    # displacement of the top-40 % of the aligned head (Y > 60th percentile)
+    # from the whole array, which removes the rigid component while preserving
+    # the relative jaw-to-skull motion.
+    _LOWER_FACE_BLENDSHAPES: frozenset[str] = frozenset({
+        "jawOpen", "jawForward", "jawLeft", "jawRight",
+        "mouthClose",
+        "mouthDimpleLeft", "mouthDimpleRight",
+        "mouthFrownLeft", "mouthFrownRight",
+        "mouthFunnel",
+        "mouthLeft", "mouthRight",
+        "mouthLowerDownLeft", "mouthLowerDownRight",
+        "mouthPressLeft", "mouthPressRight",
+        "mouthPucker",
+        "mouthRollLower", "mouthRollUpper",
+        "mouthShrugLower", "mouthShrugUpper",
+        "mouthSmileLeft", "mouthSmileRight",
+        "mouthStretchLeft", "mouthStretchRight",
+        "mouthUpperUpLeft", "mouthUpperUpRight",
+        "cheekPuff", "cheekSquintLeft", "cheekSquintRight",
+        "noseSneerLeft", "noseSneerRight",
+        "tongueOut",
+    })
+
+    y_arr = target_verts[:, 1]
+    upper_thresh = float(y_arr.min()) + 0.60 * float(y_arr.max() - y_arr.min())
+    upper_mask = y_arr > upper_thresh
+    n_upper = int(upper_mask.sum())
+
+    if n_upper > 5:
+        anchored_count = 0
+        for name in _LOWER_FACE_BLENDSHAPES:
+            disp = target_morph_targets.get(name)
+            if disp is None:
+                continue
+            mean_upper = disp[upper_mask].mean(axis=0)   # (3,)
+            correction_mag = float(np.linalg.norm(mean_upper))
+            if correction_mag > 5e-5:   # skip if already < 0.05 mm
+                target_morph_targets[name] = disp - mean_upper
+                anchored_count += 1
+                log.debug(
+                    "upper-face anchor %s: removed offset [%.5f %.5f %.5f]m (%.3fmm)",
+                    name, *mean_upper, correction_mag * 1000,
+                )
+        if anchored_count:
+            log.info(
+                "Upper-face anchoring applied to %d/%d lower-face blendshapes "
+                "(upper_thresh Y=%.4f, n_upper=%d).",
+                anchored_count, len(_LOWER_FACE_BLENDSHAPES), upper_thresh, n_upper,
+            )
+
     method_name = (
         "landmark-anchored RBF" if _landmark_anchors is not None
         else ("barycentric" if use_barycentric else "IDW k=4")
