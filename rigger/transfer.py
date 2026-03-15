@@ -574,6 +574,116 @@ def transfer_morph_targets(
     jaw_claire_mean = float(jaw_claire_mags[jaw_claire_mags > 1e-9].mean()) if (jaw_claire_mags > 1e-9).any() else 0.0
     log.info("Claire jawOpen reference: mean=%.6fm (%.2fmm)", jaw_claire_mean, jaw_claire_mean * 1000)
 
+    # ── Anatomical masking: per-mesh Y thresholds ───────────────────────────
+    # All coordinates are in ICP-aligned space (metres, Y-up).
+    _y_verts = target_verts[:, 1]
+    _z_verts = target_verts[:, 2]
+    _x_verts = target_verts[:, 0]
+    _face_height = float(_y_verts.max() - _y_verts.min())
+    _x_range_mesh = float(_x_verts.max() - _x_verts.min())
+
+    # Y-distribution diagnostic: shows where the face zones actually sit.
+    _y_pcts = np.percentile(_y_verts, [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95])
+    log.info(
+        "Target Y percentiles (ICP-aligned, metres): "
+        "p5=%.4f  p10=%.4f  p20=%.4f  p30=%.4f  p40=%.4f  p50=%.4f  "
+        "p60=%.4f  p70=%.4f  p80=%.4f  p90=%.4f  p95=%.4f",
+        *_y_pcts,
+    )
+    log.info(
+        "Target mesh extent: Y=[%.4f, %.4f]  Z=[%.4f, %.4f]  X=[%.4f, %.4f]  "
+        "face_height=%.4fm",
+        float(_y_verts.min()), float(_y_verts.max()),
+        float(_z_verts.min()), float(_z_verts.max()),
+        float(_x_verts.min()), float(_x_verts.max()),
+        _face_height,
+    )
+
+    # Nose tip: frontmost (max Z) vertex near the facial centre (|X| < 15 % of width).
+    _center_mask = np.abs(_x_verts) < _x_range_mesh * 0.15
+    _n_center_candidates = int(_center_mask.sum())
+    if _n_center_candidates >= 1:
+        _center_indices = np.where(_center_mask)[0]
+        _nose_local = int(np.argmax(_z_verts[_center_mask]))
+        _nose_tip_idx = int(_center_indices[_nose_local])
+        _nose_y = float(_y_verts[_nose_tip_idx])
+        log.info(
+            "Nose tip vertex: idx=%d  pos=(X=%.4f, Y=%.4f, Z=%.4f)  "
+            "candidates_in_center_band=%d  |X|_threshold=%.4fm",
+            _nose_tip_idx,
+            float(_x_verts[_nose_tip_idx]),
+            float(_y_verts[_nose_tip_idx]),
+            float(_z_verts[_nose_tip_idx]),
+            _n_center_candidates,
+            _x_range_mesh * 0.15,
+        )
+    else:
+        _nose_y = float(np.percentile(_y_verts, 40))
+        log.warning("Nose tip: no center-band vertices found — fallback nose_y=%.4fm", _nose_y)
+
+    # Jaw-region upper cutoff.
+    #
+    # We tried deriving this from Claire's jawOpen displacement field but that
+    # approach fails: jawOpen displaces vertices all the way up to the cheeks,
+    # so "max Y of significant jaw verts" lands at cheek level — far above the
+    # mouth.  The correct boundary is simpler: the nose tip Y IS the cutoff.
+    # Anything at or above the nose (nose, cheeks, eyes, brows) must not move
+    # with jaw blendshapes.  We add a small upward buffer (+0.01 m / 1 cm) so
+    # the nose tip vertex itself is included in the zeroed set.
+    #
+    # Sanity check from this run's data:
+    #   nose_y ≈ -0.025 m  (nose tip, correctly found as max-Z centre vertex)
+    #   Claire-derived value was ≈ +0.042 m  ← above the nose → nose moves → WRONG
+    _jaw_cutoff_y = _nose_y + 0.01
+
+    # Lower lip / upper-mouth boundary.
+    # Estimate chin as the 5th-percentile Y (lowest real face geometry, not outliers).
+    _chin_y = float(np.percentile(_y_verts, 5))
+    _nose_to_chin = abs(_nose_y - _chin_y)
+    # Upper lip sits roughly 20 % of the nose-to-chin distance below the nose.
+    _lower_lip_y = _nose_y - 0.20 * _nose_to_chin
+
+    # Nose base Y: slightly below nose tip (≈ 5 % of face height lower).
+    _nose_base_y = _nose_y - 0.05 * _face_height
+
+    log.info(
+        "Anatomical mask thresholds — "
+        "jaw_cutoff_y=%.4fm (nose_y=%.4fm + 10mm)  "
+        "lower_lip_y=%.4fm  nose_base_y=%.4fm  "
+        "chin_y(p5)=%.4fm  nose_to_chin=%.4fm  face_height=%.4fm",
+        _jaw_cutoff_y, _nose_y, _lower_lip_y, _nose_base_y,
+        _chin_y, _nose_to_chin, _face_height,
+    )
+
+    # Blendshape → mask group membership.
+    _MASK_LOWER_JAW: frozenset[str] = frozenset({
+        "jawOpen", "jawForward", "jawLeft", "jawRight",
+        "mouthClose", "mouthFunnel", "mouthPucker",
+        "mouthLeft", "mouthRight",
+        "mouthLowerDownLeft", "mouthLowerDownRight",
+        "mouthRollLower", "mouthShrugLower",
+        "mouthPressLeft", "mouthPressRight",
+    })
+    _MASK_UPPER_MOUTH: frozenset[str] = frozenset({
+        "mouthShrugUpper", "mouthUpperUpLeft", "mouthUpperUpRight", "mouthRollUpper",
+    })
+    _MASK_NOSE_SNEER: frozenset[str] = frozenset({
+        "noseSneerLeft", "noseSneerRight",
+    })
+
+    # Boolean vertex masks (computed once, reused across blendshapes).
+    _above_jaw_cutoff = _y_verts > _jaw_cutoff_y   # at/above nose → frozen for jaw shapes
+    _below_lip_mask   = _y_verts < _lower_lip_y    # vertices below lower lip
+    _below_nose_base  = _y_verts < _nose_base_y    # vertices below nose base
+
+    log.info(
+        "Vertex mask counts — above_jaw_cutoff (Y>%.4f): %d/%d  "
+        "below_lower_lip (Y<%.4f): %d/%d  below_nose_base (Y<%.4f): %d/%d",
+        _jaw_cutoff_y, int(_above_jaw_cutoff.sum()), len(target_verts),
+        _lower_lip_y,  int(_below_lip_mask.sum()),   len(target_verts),
+        _nose_base_y,  int(_below_nose_base.sum()),  len(target_verts),
+    )
+
     target_morph_targets: dict[str, np.ndarray] = {}
     jaw_transferred_mean: float | None = None
 
@@ -601,6 +711,46 @@ def transfer_morph_targets(
         if name == "jawOpen":
             nonzero = mags[mags > 1e-9]
             jaw_transferred_mean = float(nonzero.mean()) if len(nonzero) else 0.0
+
+        # ── Post-transfer anatomical masking ────────────────────────────────
+        # "active" = displacement magnitude > 0.1 mm (meaningful motion)
+        _active = mags > 1e-4
+        if name in _MASK_LOWER_JAW:
+            n_masked        = int(_above_jaw_cutoff.sum())
+            n_active_masked = int((_above_jaw_cutoff & _active).sum())
+            if n_masked > 0:
+                target_disp = target_disp.copy()
+                target_disp[_above_jaw_cutoff] = 0.0
+            log.info(
+                "Mask [jaw/lower-mouth] %-30s  "
+                "zeroed %d/%d verts above jaw_cutoff_y=%.4fm  "
+                "(%d had |disp|>0.1mm — these were suppressed)",
+                name, n_masked, len(target_verts), _jaw_cutoff_y, n_active_masked,
+            )
+        elif name in _MASK_UPPER_MOUTH:
+            n_masked        = int(_below_lip_mask.sum())
+            n_active_masked = int((_below_lip_mask & _active).sum())
+            if n_masked > 0:
+                target_disp = target_disp.copy()
+                target_disp[_below_lip_mask] = 0.0
+            log.info(
+                "Mask [upper-mouth]    %-30s  "
+                "zeroed %d/%d verts below lower_lip_y=%.4fm  "
+                "(%d had |disp|>0.1mm — these were suppressed)",
+                name, n_masked, len(target_verts), _lower_lip_y, n_active_masked,
+            )
+        elif name in _MASK_NOSE_SNEER:
+            n_masked        = int(_below_nose_base.sum())
+            n_active_masked = int((_below_nose_base & _active).sum())
+            if n_masked > 0:
+                target_disp = target_disp.copy()
+                target_disp[_below_nose_base] = 0.0
+            log.info(
+                "Mask [nose-sneer]     %-30s  "
+                "zeroed %d/%d verts below nose_base_y=%.4fm  "
+                "(%d had |disp|>0.1mm — these were suppressed)",
+                name, n_masked, len(target_verts), _nose_base_y, n_active_masked,
+            )
 
         target_morph_targets[name] = target_disp
 
