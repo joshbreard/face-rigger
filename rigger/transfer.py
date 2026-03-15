@@ -291,12 +291,12 @@ _LANDMARK_TO_CLAIRE_POS: dict[int, tuple[float, float, float]] = {
 }
 
 
-def _detect_landmarks(mesh_verts: np.ndarray, image_size: int = 512) -> np.ndarray | None:
-    """Project *mesh_verts* to a frontal 2D image and run mediapipe FaceLandmarker.
+def _detect_landmarks(mesh: trimesh.Trimesh, image_size: int = 512) -> np.ndarray | None:
+    """Project *mesh* to a frontal 2D image with filled triangles and run mediapipe FaceLandmarker.
 
     Parameters
     ----------
-    mesh_verts : (N, 3) array in ICP-aligned metres, centred at origin.
+    mesh : trimesh.Trimesh in ICP-aligned metres, centred at origin.
 
     Returns
     -------
@@ -318,30 +318,110 @@ def _detect_landmarks(mesh_verts: np.ndarray, image_size: int = 512) -> np.ndarr
             " -o assets/face_landmarker.task"
         )
 
+    mesh_verts = np.asarray(mesh.vertices, dtype=np.float64)
+    mesh_faces = np.asarray(mesh.faces, dtype=np.int32)
+
     x = mesh_verts[:, 0]
     y = mesh_verts[:, 1]
-    x_min, x_max = float(x.min()), float(x.max())
-    y_min, y_max = float(y.min()), float(y.max())
-    x_range = x_max - x_min
-    y_range = y_max - y_min
+    x_min_raw = float(x.min())
+    x_range_raw = float(x.max() - x_min_raw)
+    y_min_raw = float(y.min())
+    y_range_raw = float(y.max() - y_min_raw)
 
-    if x_range < 1e-9 or y_range < 1e-9:
+    if x_range_raw < 1e-9 or y_range_raw < 1e-9:
         log.warning("Landmark detection: degenerate vertex XY range — skipping.")
         return None
 
-    # Map world XY -> pixel coords (flip Y so +Y = up in world = up in image).
-    px = ((x - x_min) / x_range * (image_size - 1)).astype(np.int32)
-    py = ((1.0 - (y - y_min) / y_range) * (image_size - 1)).astype(np.int32)
-    px = np.clip(px, 0, image_size - 1)
-    py = np.clip(py, 0, image_size - 1)
+    # 5% padding on each side so the face doesn't butt against the image border.
+    PAD = 0.05
+    x_min = x_min_raw - x_range_raw * PAD
+    x_range = x_range_raw * (1.0 + 2.0 * PAD)
+    y_min = y_min_raw - y_range_raw * PAD
+    y_range = y_range_raw * (1.0 + 2.0 * PAD)
 
+    # Map world XY -> pixel coords (flip Y so +Y = up in world = up in image).
+    px = np.clip(((x - x_min) / x_range * (image_size - 1)).astype(np.int32), 0, image_size - 1)
+    py = np.clip(((1.0 - (y - y_min) / y_range) * (image_size - 1)).astype(np.int32), 0, image_size - 1)
+
+    # ── Render filled triangles with depth shading ────────────────────────────
+    # Front-facing triangles (normal_z > 0) are depth-sorted and shaded by Z
+    # to produce a recognisable face silhouette that MediaPipe's detector can latch onto.
     img = np.zeros((image_size, image_size), dtype=np.uint8)
-    # Draw each vertex as a filled circle of radius 2px using vectorised ops.
-    for dy in range(-2, 3):
-        for dx in range(-2, 3):
-            if dx * dx + dy * dy <= 4:
-                img[np.clip(py + dy, 0, image_size - 1),
-                    np.clip(px + dx, 0, image_size - 1)] = 200
+    pts_2d = np.stack([px, py], axis=1).astype(np.int32)
+
+    face_normals = mesh.face_normals          # (F, 3) unit normals
+    front_mask = face_normals[:, 2] > 0.0    # only camera-facing triangles
+
+    z_verts = mesh_verts[:, 2]
+    face_z = z_verts[mesh_faces].mean(axis=1)  # mean Z per face
+
+    front_idx = np.where(front_mask)[0]
+    rendered = False
+    if len(front_idx) > 0:
+        # Back-to-front order (painter's algorithm).
+        order = front_idx[np.argsort(face_z[front_idx])]
+        sorted_faces = mesh_faces[order]   # (F', 3)
+        sorted_z     = face_z[order]
+        z_lo = float(sorted_z[0])
+        z_hi = float(sorted_z[-1])
+        z_rng = max(z_hi - z_lo, 1e-9)
+
+        # Quantise depth into 20 grey levels (80–220) for batch rendering.
+        N_LEVELS = 20
+        level_arr = np.floor(
+            (sorted_z - z_lo) / z_rng * (N_LEVELS - 1)
+        ).astype(np.int32).clip(0, N_LEVELS - 1)
+
+        try:
+            import cv2
+            for lv in range(N_LEVELS):
+                sel = level_arr == lv
+                if not sel.any():
+                    continue
+                color = int(80 + lv / (N_LEVELS - 1) * 140)
+                tris = pts_2d[sorted_faces[sel]]  # (M, 3, 2)
+                # cv2.fillPoly expects a list of (N_pts, 1, 2) int32 arrays.
+                polys = list(tris.reshape(len(tris), 3, 1, 2))
+                cv2.fillPoly(img, polys, color=color)
+            rendered = True
+        except ImportError:
+            pass
+
+        if not rendered:
+            try:
+                from PIL import Image as PILImage, ImageDraw
+                pil_img = PILImage.fromarray(img, mode="L")
+                draw = ImageDraw.Draw(pil_img)
+                for lv in range(N_LEVELS):
+                    sel = level_arr == lv
+                    if not sel.any():
+                        continue
+                    color = int(80 + lv / (N_LEVELS - 1) * 140)
+                    for f in sorted_faces[sel]:
+                        tri = [
+                            (int(pts_2d[f[0], 0]), int(pts_2d[f[0], 1])),
+                            (int(pts_2d[f[1], 0]), int(pts_2d[f[1], 1])),
+                            (int(pts_2d[f[2], 0]), int(pts_2d[f[2], 1])),
+                        ]
+                        draw.polygon(tri, fill=color)
+                img = np.array(pil_img)
+                rendered = True
+            except ImportError:
+                pass
+
+    if not rendered:
+        # Last-resort fallback: large dots (radius 4 px).
+        log.warning(
+            "Landmark render: neither cv2 nor PIL available; using large dot fallback "
+            "(face detection may fail)."
+        )
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                if dx * dx + dy * dy <= 16:
+                    img[
+                        np.clip(py + dy, 0, image_size - 1),
+                        np.clip(px + dx, 0, image_size - 1),
+                    ] = 200
 
     img_rgb = np.stack([img, img, img], axis=-1)  # Tasks API needs HxWx3 SRGB
 
@@ -394,10 +474,17 @@ def _build_landmark_anchors(
     """
     x = meshy_verts[:, 0]
     y = meshy_verts[:, 1]
-    x_min, x_max = float(x.min()), float(x.max())
-    y_min, y_max = float(y.min()), float(y.max())
-    x_range = x_max - x_min
-    y_range = y_max - y_min
+    x_min_raw = float(x.min())
+    x_range_raw = float(x.max() - x_min_raw)
+    y_min_raw = float(y.min())
+    y_range_raw = float(y.max() - y_min_raw)
+
+    # Must match the 5% padding used in _detect_landmarks.
+    PAD = 0.05
+    x_min = x_min_raw - x_range_raw * PAD
+    x_range = x_range_raw * (1.0 + 2.0 * PAD)
+    y_min = y_min_raw - y_range_raw * PAD
+    y_range = y_range_raw * (1.0 + 2.0 * PAD)
 
     # KDTree on Meshy XY projection for fast nearest-vertex lookup.
     meshy_xy_tree = KDTree(meshy_verts[:, :2])
@@ -537,7 +624,7 @@ def transfer_morph_targets(
         try:
             import mediapipe  # noqa: F401 — presence check
             import mediapipe.tasks  # noqa: F401 — ensure Tasks API is available
-            lm_pixels = _detect_landmarks(target_verts)
+            lm_pixels = _detect_landmarks(target_mesh)
             if lm_pixels is not None:
                 meshy_idx, claire_idx = _build_landmark_anchors(target_verts, lm_pixels)
                 _landmark_anchors = (meshy_idx, claire_idx)
