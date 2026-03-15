@@ -513,6 +513,14 @@ def transfer_morph_targets(
             f"Ensure '{BS_SKIN_PATH}' exists and is valid."
         )
 
+    # NOTE: kaolin_deformer is not called here.
+    # Deforming target_mesh vertices before transfer causes delta vectors computed
+    # in ICP-aligned space to be applied against the original undeformed GLB vertices,
+    # producing inconsistent displacements and visible mesh tears.  The deformer
+    # module (rigger/kaolin_deformer.py) is retained for future use once the
+    # pipeline is extended to propagate the deformed-mesh reference frame through
+    # to the GLB patch step.
+
     target_verts = np.array(target_mesh.vertices, dtype=np.float64)
 
     log.info(
