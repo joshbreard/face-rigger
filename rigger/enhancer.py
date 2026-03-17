@@ -2,8 +2,7 @@
 
 Runs AFTER the user confirms the neck cutoff plane and BEFORE the
 separator/RBF pipeline. Produces a remeshed head with:
-  - Dense isotropic topology around eyes, mouth, nose, and brows (3 mm target)
-  - Moderate density on the rest of the face (5.5 mm target)
+  - Uniform dense isotropic topology across the face region (3 mm target)
   - Eyeball geometry preserved exactly (no remesh)
   - Pre-cut mouth slit on clean topology
   - UV transfer via barycentric interpolation (seam-safe)
@@ -37,9 +36,7 @@ _EYEBALL_SEARCH_RADIUS_M = 0.007       # 7 mm
 _EYEBALL_SPHERE_TOLERANCE_M = 0.001    # 1 mm
 _FACE_RADIUS_FROM_NOSE_M = 0.040       # 40 mm
 _DENSE_REGION_RADIUS_M = 0.015         # 15 mm from eye/mouth/brow landmarks
-_NOSE_REGION_RADIUS_M = 0.025          # 25 mm — covers tip + nostrils + bridge base
 _TARGET_EDGE_DENSE_M = 0.003           # 3 mm
-_TARGET_EDGE_STANDARD_M = 0.0055       # 5.5 mm
 _REMESH_ITERATIONS = 5
 _BOUNDARY_SNAP_TOL_M = 0.005           # 5 mm — vertices within this of neck_cutoff_y are snapped
 
@@ -347,11 +344,11 @@ class MeshEnhancer:
         region_centers: dict[str, np.ndarray],
         nose_tip: np.ndarray,
     ) -> tuple[trimesh.Trimesh, dict[str, Any]]:
-        """Two-pass region-aware isotropic remeshing using pymeshlab.
+        """Single-pass isotropic remeshing of the face region using pymeshlab.
 
-        Pass 1: coarse remesh of the full face region at the standard target.
-        Pass 2: fine remesh of dense sub-regions (eyes, mouth, nose, brows)
-        extracted from the coarse result, refined at the dense target.
+        Remeshes the entire face region at the dense target edge length to
+        produce uniform topology with no seam artifacts between dense and
+        non-dense zones.
 
         Eyeball verts and geometry outside the face region are preserved.
         """
@@ -369,15 +366,6 @@ class MeshEnhancer:
         face_in_region = np.all(face_region[faces], axis=1)
         face_outside = ~face_in_region
 
-        # Dense sub-regions: (center, radius) tuples
-        dense_regions = []
-        for key in ("left_eye", "right_eye", "mouth_center", "left_brow", "right_brow"):
-            if key in region_centers:
-                dense_regions.append((region_centers[key], _DENSE_REGION_RADIUS_M))
-        if "nose_tip" in region_centers:
-            dense_regions.append((region_centers["nose_tip"], _NOSE_REGION_RADIUS_M))
-
-        # ── Remesh face region in two passes: dense regions, then standard ────
         # Extract face-region sub-mesh
         region_face_indices = np.where(face_in_region)[0]
         if len(region_face_indices) < 10:
@@ -395,7 +383,7 @@ class MeshEnhancer:
         region_verts = verts[region_vert_idx]
         region_faces_remapped = np.vectorize(old_to_new.get)(region_faces).astype(np.int32)
 
-        # ── Pass 1: coarse remesh of entire face region at standard target ──
+        # ── Single-pass fine remesh of entire face region ────────────────
         ms = pymeshlab.MeshSet()
         m = pymeshlab.Mesh(
             vertex_matrix=region_verts.astype(np.float64),
@@ -403,70 +391,19 @@ class MeshEnhancer:
         )
         ms.add_mesh(m)
 
-        coarse_mm = _TARGET_EDGE_STANDARD_M * 1000.0
+        fine_mm = _TARGET_EDGE_DENSE_M * 1000.0
         ms.meshing_isotropic_explicit_remeshing(
-            targetlen=pymeshlab.PureValue(coarse_mm),
+            targetlen=pymeshlab.PureValue(fine_mm),
             iterations=_REMESH_ITERATIONS,
             adaptive=True,
             featuredeg=30.0,
             checksurfdist=True,
-            maxsurfdist=pymeshlab.PureValue(coarse_mm * 0.5),
+            maxsurfdist=pymeshlab.PureValue(fine_mm * 0.5),
         )
 
-        coarse_result = ms.current_mesh()
-        coarse_verts = coarse_result.vertex_matrix()
-        coarse_faces = coarse_result.face_matrix()
-
-        # ── Pass 2: fine remesh of dense sub-regions ─────────────────────
-        # Identify coarse faces whose centroids fall within a dense region
-        coarse_centroids = coarse_verts[coarse_faces].mean(axis=1)
-        dense_face_mask = np.zeros(len(coarse_faces), dtype=bool)
-        for lm, radius in dense_regions:
-            d = np.linalg.norm(coarse_centroids - lm, axis=1)
-            dense_face_mask |= (d <= radius)
-
-        if dense_face_mask.any() and dense_face_mask.sum() >= 4:
-            # Extract dense sub-mesh from coarse result
-            dense_sub_faces = coarse_faces[dense_face_mask]
-            dense_vert_idx = np.unique(dense_sub_faces.flatten())
-            dense_map = {int(old): new for new, old in enumerate(dense_vert_idx)}
-            dense_sub_verts = coarse_verts[dense_vert_idx]
-            dense_sub_faces_r = np.vectorize(dense_map.get)(dense_sub_faces).astype(np.int32)
-
-            ms2 = pymeshlab.MeshSet()
-            m2 = pymeshlab.Mesh(
-                vertex_matrix=dense_sub_verts.astype(np.float64),
-                face_matrix=dense_sub_faces_r.astype(np.int32),
-            )
-            ms2.add_mesh(m2)
-
-            fine_mm = _TARGET_EDGE_DENSE_M * 1000.0
-            ms2.meshing_isotropic_explicit_remeshing(
-                targetlen=pymeshlab.PureValue(fine_mm),
-                iterations=_REMESH_ITERATIONS,
-                adaptive=True,
-                featuredeg=30.0,
-                checksurfdist=True,
-                maxsurfdist=pymeshlab.PureValue(fine_mm * 0.5),
-            )
-
-            fine_result = ms2.current_mesh()
-            fine_verts = fine_result.vertex_matrix()
-            fine_faces = fine_result.face_matrix()
-
-            # Combine: non-dense coarse faces + fine dense faces
-            std_sub_faces = coarse_faces[~dense_face_mask]
-            std_vert_idx = np.unique(std_sub_faces.flatten())
-            std_map = {int(old): new for new, old in enumerate(std_vert_idx)}
-            std_sub_verts = coarse_verts[std_vert_idx]
-            std_sub_faces_r = np.vectorize(std_map.get)(std_sub_faces).astype(np.int32)
-
-            offset = len(std_sub_verts)
-            remeshed_verts = np.vstack([std_sub_verts, fine_verts])
-            remeshed_faces = np.vstack([std_sub_faces_r, fine_faces + offset])
-        else:
-            remeshed_verts = coarse_verts
-            remeshed_faces = coarse_faces
+        remeshed_result = ms.current_mesh()
+        remeshed_verts = remeshed_result.vertex_matrix()
+        remeshed_faces = remeshed_result.face_matrix()
 
         # ── Merge back: outside-region faces + remeshed face region ──────
         outside_face_indices = np.where(face_outside)[0]
