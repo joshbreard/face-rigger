@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import tempfile
 import uuid
@@ -35,6 +36,8 @@ from rigger.validator import score_rig
 
 TMP_DIR = Path("tmp")
 
+rig_semaphore: asyncio.Semaphore  # initialised in startup_event
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -55,7 +58,11 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    global rig_semaphore
     TMP_DIR.mkdir(exist_ok=True)
+    max_concurrent = int(os.getenv("MAX_CONCURRENT_RIGS", "2"))
+    rig_semaphore = asyncio.Semaphore(max_concurrent)
+    log.info("Rig semaphore initialised (MAX_CONCURRENT_RIGS=%d).", max_concurrent)
     if not BS_SKIN_PATH.exists():
         log.error(
             "STARTUP ERROR: Claire blendshape skin not found at '%s'. "
@@ -217,13 +224,13 @@ async def rig(
     )
     log.info("Read %d bytes.", len(glb_bytes))
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        input_path = tmp / "input.glb"
-        output_path = tmp / "rigged_output.glb"
-        input_path.write_bytes(glb_bytes)
+    def _run_pipeline() -> tuple:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "input.glb"
+            output_path = tmp / "rigged_output.glb"
+            input_path.write_bytes(glb_bytes)
 
-        try:
             log.info("Separating head and body meshes...")
             head_mesh, body_mesh, scene_meta = separate_head_body(
                 input_path, y_back=y_back, y_front=y_front,
@@ -290,35 +297,42 @@ async def rig(
                 head_vert_indices=scene_meta.get("head_vert_indices"),
             )
 
+            # ── Output validation ────────────────────────────────────────────
+            log.info("=== Output validation ===")
+            validation_data = score_rig(blendshapes_orig)
+            log.info(
+                "Rig quality: score=%.2f pass=%d/52 critical_failures=%s",
+                validation_data["overall_score"],
+                validation_data["pass_c"],
+                validation_data["critical_failures"],
+            )
+
+            # Copy output outside the TemporaryDirectory before it's cleaned up.
+            final_path = Path(tempfile.mktemp(suffix=".glb"))
+            final_path.write_bytes(output_path.read_bytes())
+
+            # Persist validation JSON so /validate/{rig_id} can serve it.
+            rig_id = str(uuid.uuid4())
+            _validate_path = TMP_DIR / f"{rig_id}.validate.json"
+            _validate_path.write_text(json.dumps(validation_data))
+
+            return validation_data, final_path, rig_id, _validate_path
+
+    async with rig_semaphore:
+        try:
+            loop = asyncio.get_event_loop()
+            validation_data, final_path, rig_id, _validate_path = await loop.run_in_executor(
+                None, _run_pipeline
+            )
         except Exception as exc:
             log.exception("Pipeline failed: %s", exc)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-        # ── Output validation ────────────────────────────────────────────────
-        log.info("=== Output validation ===")
-        validation_data = score_rig(blendshapes_orig)
-        all_pass = validation_data["all_pass"]
-        overall_score = validation_data["overall_score"]
-        fail_count = validation_data["fail_count"]
-        pass_c = validation_data["pass_c"]
-        failing = validation_data["failing_blendshapes"]
-        critical_failures = validation_data["critical_failures"]
-        log.info(
-            "Rig quality: score=%.2f pass=%d/52 critical_failures=%s",
-            overall_score, pass_c, critical_failures,
-        )
+    asyncio.get_event_loop().create_task(_delete_after_delay(_validate_path, 600.0))
 
-        # Copy output outside the TemporaryDirectory before it's cleaned up.
-        final_path = Path(tempfile.mktemp(suffix=".glb"))
-        final_path.write_bytes(output_path.read_bytes())
-
-        # Persist validation JSON and rigged GLB copy so /validate/{rig_id} can serve them.
-        rig_id = str(uuid.uuid4())
-        _validate_path = TMP_DIR / f"{rig_id}.validate.json"
-        _validate_path.write_text(json.dumps(validation_data))
-        asyncio.get_event_loop().create_task(_delete_after_delay(_validate_path, 600.0))
-
-    failures_header = ",".join(failing)
+    all_pass = validation_data["all_pass"]
+    overall_score = validation_data["overall_score"]
+    failures_header = ",".join(validation_data["failing_blendshapes"])
 
     # Clean up the temp preview file now that rigging is done.
     if temp_id is not None:
