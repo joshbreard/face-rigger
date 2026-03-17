@@ -13,6 +13,7 @@
     }
   }
   </script>
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -417,6 +418,129 @@
       font-size: 0.82rem;
     }
 
+    /* ── Enhanced Mode toggle ──────────────────────────────────────────── */
+    .mode-toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.82rem;
+      color: #9090a8;
+    }
+    .toggle-switch {
+      position: relative;
+      width: 40px;
+      height: 22px;
+      flex-shrink: 0;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-track {
+      position: absolute;
+      inset: 0;
+      background: #2a2a3a;
+      border-radius: 11px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle-track::after {
+      content: '';
+      position: absolute;
+      width: 16px; height: 16px;
+      left: 3px; top: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle-switch input:checked + .toggle-track { background: #6e6eff; }
+    .toggle-switch input:checked + .toggle-track::after { transform: translateX(18px); }
+    .mode-label-enhanced { color: #a0a0ff; font-weight: 500; }
+
+    /* ── Validation panel ──────────────────────────────────────────────── */
+    #validation-panel {
+      background: #111114;
+      border: 1px solid #22222a;
+      border-radius: 10px;
+      padding: 14px 16px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #validation-panel h3 {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #55556a;
+      margin: 0;
+    }
+    .val-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.82rem;
+    }
+    .val-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .val-dot.pass { background: #22c55e; }
+    .val-dot.fail { background: #ef4444; }
+    .val-name { color: #c0c0d0; flex: 1; }
+    .val-mm { font-family: monospace; font-size: 0.78rem; color: #6b6b75; }
+    .val-badge {
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+    .val-badge.pass { background: rgba(34,197,94,0.12); color: #22c55e; }
+    .val-badge.fail { background: rgba(239,68,68,0.12); color: #ef4444; }
+
+    /* ── model-viewer blendshape scrubber ──────────────────────────────── */
+    #mv-section {
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #mv-section h3 {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #55556a;
+      margin: 0;
+    }
+    #mv-viewer {
+      width: 100%;
+      height: 340px;
+      border-radius: 10px;
+      background: #0d0d0f;
+      --poster-color: #0d0d0f;
+    }
+    .mv-sliders {
+      display: grid;
+      grid-template-columns: 140px 1fr 42px;
+      gap: 6px 10px;
+      align-items: center;
+    }
+    .mv-slider-label {
+      font-size: 0.78rem;
+      color: #c0c0d0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .mv-slider-input {
+      width: 100%;
+      accent-color: #6e6eff;
+    }
+    .mv-slider-val {
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: #6b6b75;
+      text-align: right;
+    }
+
     /* ── Responsive collapse ───────────────────────────────────────────── */
     @media (max-width: 680px) {
       #preview-panel {
@@ -484,9 +608,19 @@
           <span>Back Y: <code class="y-readout" id="back-y-disp" style="color:#f97316;">—</code></span>
           <span>Front Y: <code class="y-readout" id="front-y-disp" style="color:#6e6eff;">—</code></span>
         </div>
-        <div style="display:flex;gap:10px;">
-          <button class="retry-btn" id="reupload-btn">← Re-upload</button>
-          <button id="rig-it-btn">Rig It →</button>
+        <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;">
+          <label class="mode-toggle-row" title="POU-RBF + Landmark NICP: eliminates cross-region contamination (smiling moves eyes, etc.)">
+            <span>Enhanced Mode</span>
+            <span class="toggle-switch">
+              <input type="checkbox" id="enhanced-toggle" checked />
+              <span class="toggle-track"></span>
+            </span>
+            <span class="mode-label-enhanced" id="mode-label">POU-RBF + Landmark NICP</span>
+          </label>
+          <div style="display:flex;gap:10px;">
+            <button class="retry-btn" id="reupload-btn">← Re-upload</button>
+            <button id="rig-it-btn">Rig It →</button>
+          </div>
         </div>
       </div>
     </div>
@@ -504,6 +638,28 @@
         <div class="success-actions">
           <a id="download-btn" href="#" download="rigged_output.glb">Download Rigged GLB</a>
           <button class="retry-btn" id="retry-btn">Rig another file</button>
+        </div>
+      </div>
+
+      <!-- ── Validation panel ── -->
+      <div id="validation-panel">
+        <h3>Blendshape Validation</h3>
+        <div id="val-rows"></div>
+      </div>
+
+      <!-- ── model-viewer blendshape scrubber ── -->
+      <div id="mv-section">
+        <h3>Preview Blendshapes</h3>
+        <model-viewer
+          id="mv-viewer"
+          camera-controls
+          touch-action="pan-y"
+          shadow-intensity="0.8"
+          environment-image="neutral"
+          exposure="1"
+        ></model-viewer>
+        <div class="mv-sliders" id="mv-sliders">
+          <!-- populated by JS -->
         </div>
       </div>
 
@@ -544,29 +700,44 @@
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
     // ── DOM refs ────────────────────────────────────────────────────────
-    const card           = document.getElementById('card');
-    const dropZone       = document.getElementById('drop-zone');
-    const fileInput      = document.getElementById('file-input');
-    const selectedFile   = document.getElementById('selected-file');
-    const uploadSection  = document.getElementById('upload-section');
-    const spinnerSection = document.getElementById('spinner-section');
-    const spinnerLabel   = document.getElementById('spinner-label');
-    const adjustSection  = document.getElementById('adjust-section');
-    const successSection = document.getElementById('success-section');
-    const errorSection   = document.getElementById('error-section');
-    const downloadBtn    = document.getElementById('download-btn');
-    const errorMsg       = document.getElementById('error-msg');
-    const retryBtn       = document.getElementById('retry-btn');
-    const retryBtnErr    = document.getElementById('retry-btn-err');
-    const reuploadBtn    = document.getElementById('reupload-btn');
-    const rigItBtn       = document.getElementById('rig-it-btn');
-    const morphList      = document.getElementById('morph-list');
-    const canvasEl       = document.getElementById('preview-canvas');
-    const canvasLoading  = document.getElementById('canvas-loading');
-    const adjustCanvasEl = document.getElementById('adjust-canvas');
-    const adjustLoading  = document.getElementById('adjust-loading');
-    const backYDisp      = document.getElementById('back-y-disp');
-    const frontYDisp     = document.getElementById('front-y-disp');
+    const card             = document.getElementById('card');
+    const dropZone         = document.getElementById('drop-zone');
+    const fileInput        = document.getElementById('file-input');
+    const selectedFile     = document.getElementById('selected-file');
+    const uploadSection    = document.getElementById('upload-section');
+    const spinnerSection   = document.getElementById('spinner-section');
+    const spinnerLabel     = document.getElementById('spinner-label');
+    const adjustSection    = document.getElementById('adjust-section');
+    const successSection   = document.getElementById('success-section');
+    const errorSection     = document.getElementById('error-section');
+    const downloadBtn      = document.getElementById('download-btn');
+    const errorMsg         = document.getElementById('error-msg');
+    const retryBtn         = document.getElementById('retry-btn');
+    const retryBtnErr      = document.getElementById('retry-btn-err');
+    const reuploadBtn      = document.getElementById('reupload-btn');
+    const rigItBtn         = document.getElementById('rig-it-btn');
+    const morphList        = document.getElementById('morph-list');
+    const canvasEl         = document.getElementById('preview-canvas');
+    const canvasLoading    = document.getElementById('canvas-loading');
+    const adjustCanvasEl   = document.getElementById('adjust-canvas');
+    const adjustLoading    = document.getElementById('adjust-loading');
+    const backYDisp        = document.getElementById('back-y-disp');
+    const frontYDisp       = document.getElementById('front-y-disp');
+    const enhancedToggle   = document.getElementById('enhanced-toggle');
+    const modeLabel        = document.getElementById('mode-label');
+    const validationPanel  = document.getElementById('validation-panel');
+    const valRows          = document.getElementById('val-rows');
+    const mvSection        = document.getElementById('mv-section');
+    const mvViewer         = document.getElementById('mv-viewer');
+    const mvSliders        = document.getElementById('mv-sliders');
+
+    // ── Enhanced Mode toggle ─────────────────────────────────────────────
+    enhancedToggle.addEventListener('change', () => {
+      modeLabel.textContent = enhancedToggle.checked
+        ? 'POU-RBF + Landmark NICP'
+        : 'Classic ICP + TPS';
+      modeLabel.style.color = enhancedToggle.checked ? '#a0a0ff' : '#6b6b75';
+    });
 
     // ── State ───────────────────────────────────────────────────────────
     // Result viewer
@@ -598,6 +769,11 @@
       _teardownRenderer();
       _teardownAdjustRenderer();
       morphList.innerHTML = '';
+      valRows.innerHTML = '';
+      validationPanel.style.display = 'none';
+      mvSection.style.display = 'none';
+      mvViewer.src = '';
+      mvSliders.innerHTML = '';
       tempId = null;
       showSection(uploadSection);
     }
@@ -661,15 +837,18 @@
 
     // ── "Rig It" → /rig ─────────────────────────────────────────────────
     rigItBtn.addEventListener('click', async () => {
-      spinnerLabel.textContent = 'Rigging face…';
+      spinnerLabel.textContent = enhancedToggle.checked
+        ? 'Rigging face (Enhanced Mode)…'
+        : 'Rigging face (Classic Mode)…';
       card.classList.remove('wide');
       _teardownAdjustRenderer();
       showSection(spinnerSection);
 
       const formData = new FormData();
-      formData.append('temp_id', tempId);
-      formData.append('y_back',  yBack.toString());
-      formData.append('y_front', yFront.toString());
+      formData.append('temp_id',    tempId);
+      formData.append('y_back',     yBack.toString());
+      formData.append('y_front',    yFront.toString());
+      formData.append('use_pou_rbf', enhancedToggle.checked ? 'true' : 'false');
 
       try {
         const response = await fetch('/rig', { method: 'POST', body: formData });
@@ -679,7 +858,8 @@
           throw new Error(detail);
         }
 
-        const blob = await response.blob();
+        const rigId = response.headers.get('X-Rig-Id');
+        const blob  = await response.blob();
         const glbUrl = URL.createObjectURL(blob);
 
         downloadBtn.href = glbUrl;
@@ -687,11 +867,106 @@
         showSection(successSection);
         canvasLoading.style.display = 'flex';
         _initRenderer(glbUrl);
+        _initModelViewer(glbUrl);
+
+        // Fetch validation results
+        if (rigId) {
+          _fetchValidation(rigId);
+        }
 
       } catch (err) {
         errorMsg.textContent = err.message || 'An unexpected error occurred.';
         showSection(errorSection);
       }
+    });
+
+    // ── Validation panel ─────────────────────────────────────────────────
+    async function _fetchValidation(rigId) {
+      try {
+        const resp = await fetch(`/validate/${rigId}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        _buildValidationPanel(data);
+      } catch (_) {}
+    }
+
+    function _buildValidationPanel(data) {
+      valRows.innerHTML = '';
+      const order = ['jawOpen', 'eyeBlinkLeft', 'eyeBlinkRight', 'mouthSmileLeft', 'mouthSmileRight'];
+      for (const name of order) {
+        const info = data[name];
+        if (!info) continue;
+        const cls = info.pass ? 'pass' : 'fail';
+        const row = document.createElement('div');
+        row.className = 'val-row';
+        row.innerHTML = `
+          <span class="val-dot ${cls}"></span>
+          <span class="val-name">${name}</span>
+          <span class="val-mm">${info.mean_displacement_mm ?? (info.mean_displacement_m * 1000).toFixed(3)} mm</span>
+          <span class="val-badge ${cls}">${info.pass ? 'PASS' : 'FAIL'}</span>
+        `;
+        valRows.appendChild(row);
+      }
+      validationPanel.style.display = 'flex';
+    }
+
+    // ── model-viewer blendshape scrubber ─────────────────────────────────
+    const _MV_SHAPES = ['jawOpen', 'eyeBlinkLeft', 'eyeBlinkRight', 'mouthSmileLeft', 'mouthFunnel'];
+
+    function _initModelViewer(glbUrl) {
+      mvViewer.src = glbUrl;
+      mvSliders.innerHTML = '';
+
+      const sliderState = {};
+      for (const name of _MV_SHAPES) {
+        sliderState[name] = 0;
+
+        const label = document.createElement('span');
+        label.className = 'mv-slider-label';
+        label.textContent = name;
+
+        const input = document.createElement('input');
+        input.type = 'range';
+        input.className = 'mv-slider-input';
+        input.min = 0; input.max = 1; input.step = 0.01; input.value = 0;
+
+        const valEl = document.createElement('span');
+        valEl.className = 'mv-slider-val';
+        valEl.textContent = '0.00';
+
+        input.addEventListener('input', () => {
+          const v = parseFloat(input.value);
+          valEl.textContent = v.toFixed(2);
+          sliderState[name] = v;
+          _applyMvWeights(sliderState);
+        });
+
+        mvSliders.appendChild(label);
+        mvSliders.appendChild(input);
+        mvSliders.appendChild(valEl);
+      }
+
+      mvSection.style.display = 'flex';
+    }
+
+    function _applyMvWeights(state) {
+      // model-viewer ≥3.3 exposes model.setMorphWeight(name, value)
+      try {
+        if (mvViewer.model) {
+          for (const [name, val] of Object.entries(state)) {
+            mvViewer.model.setMorphWeight(name, val);
+          }
+        }
+      } catch (_) {}
+    }
+
+    mvViewer.addEventListener('load', () => {
+      // Re-apply any slider values after model load
+      const state = {};
+      document.querySelectorAll('#mv-sliders .mv-slider-input').forEach((el, i) => {
+        state[_MV_SHAPES[i]] = parseFloat(el.value);
+      });
+      _applyMvWeights(state);
     });
 
     // ── Adjust Neck Line renderer ────────────────────────────────────────

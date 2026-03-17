@@ -91,6 +91,24 @@ ARKIT_BLENDSHAPES: list[str] = [
 assert len(ARKIT_BLENDSHAPES) == 52, "Must have exactly 52 blendshapes."
 
 # ---------------------------------------------------------------------------
+# Smile-shape local rescale thresholds.
+# Applied only to mouthSmileLeft / mouthSmileRight in the landmark pipeline.
+# ---------------------------------------------------------------------------
+
+# Minimum reference amplitude used when Claire's local p95 displacement is
+# near-zero (i.e. her canonical smile barely moves those verts).  We floor
+# p95_claire to this value so the ratio is still well-defined.
+SMILE_LOCAL_P95_MIN: float = 0.002  # metres (2 mm)
+
+# Target mean local displacement for smile shapes after all rescaling.  If the
+# resulting mean is still below this, a secondary boost is applied.
+SMILE_LOCAL_MEAN_TARGET: float = 0.003  # metres (3 mm)
+
+# Clamp range for the secondary mean-boost scale factor.
+SMILE_MEAN_BOOST_MIN: float = 0.5
+SMILE_MEAN_BOOST_MAX: float = 3.0
+
+# ---------------------------------------------------------------------------
 # Module-level Claire data — populated by _load_bs_skin() at import time.
 # ---------------------------------------------------------------------------
 
@@ -876,18 +894,19 @@ def transfer_morph_targets(
         target_morph_targets[name] = target_disp
 
     # ── Scale mismatch detection and correction ─────────────────────────────
+    jaw_ratio: float | None = None
     if jaw_claire_mean > 1e-9 and jaw_transferred_mean is not None and jaw_transferred_mean > 1e-9:
-        ratio = jaw_claire_mean / jaw_transferred_mean
+        jaw_ratio = jaw_claire_mean / jaw_transferred_mean
         log.info(
             "Scale check: Claire jawOpen mean=%.6fm, transferred=%.6fm, ratio=%.3f",
-            jaw_claire_mean, jaw_transferred_mean, ratio,
+            jaw_claire_mean, jaw_transferred_mean, jaw_ratio,
         )
-        if ratio > 2.0 or ratio < 0.5:
+        if jaw_ratio > 2.0 or jaw_ratio < 0.5:
             log.warning(
                 "SCALE MISMATCH (ratio=%.3f) — rescaling all 52 targets by %.4f.",
-                ratio, ratio,
+                jaw_ratio, jaw_ratio,
             )
-            target_morph_targets = {k: v * ratio for k, v in target_morph_targets.items()}
+            target_morph_targets = {k: v * jaw_ratio for k, v in target_morph_targets.items()}
 
     # ── Post-RBF local rescaling for eye and smile shapes ───────────────────────
     # For blendshapes whose transfer is known to under/over-shoot in a localised
@@ -953,14 +972,27 @@ def transfer_morph_targets(
         _xfer_local_mags = np.linalg.norm(_xfer_disp[_local_t], axis=1)
         _xfer_p95 = float(np.percentile(_xfer_local_mags, 95))
 
+        # Determine the reference p95 amplitude.  For smile shapes whose
+        # Claire p95 is near-zero we clamp up to SMILE_LOCAL_P95_MIN so
+        # the ratio is still meaningful (and typically > 1, scaling the
+        # transferred smile up toward a physiologically plausible amplitude).
+        _p95_ref = _claire_p95
         if _claire_p95 < 1e-6 or _xfer_p95 < 1e-6:
-            log.info(
-                "LocalRescale [%s]: p95 near-zero (claire=%.4fmm, xfer=%.4fmm) — skipping.",
-                _rname, _claire_p95 * 1000, _xfer_p95 * 1000,
-            )
-            continue
+            if _is_smile and _xfer_p95 > 1e-6:
+                _p95_ref = SMILE_LOCAL_P95_MIN
+                log.info(
+                    "LocalRescale [%s]: p95_claire near-zero (claire=%.4fmm, xfer=%.4fmm) — "
+                    "smile fallback: using ref=%.4fmm.",
+                    _rname, _claire_p95 * 1000, _xfer_p95 * 1000, _p95_ref * 1000,
+                )
+            else:
+                log.info(
+                    "LocalRescale [%s]: p95 near-zero (claire=%.4fmm, xfer=%.4fmm) — skipping.",
+                    _rname, _claire_p95 * 1000, _xfer_p95 * 1000,
+                )
+                continue
 
-        _ratio = _claire_p95 / _xfer_p95
+        _ratio = _p95_ref / _xfer_p95
         if 0.5 <= _ratio <= 2.0:
             log.info(
                 "LocalRescale [%s]: ratio=%.3f within [0.5, 2.0] — no rescale needed "
@@ -971,12 +1003,65 @@ def transfer_morph_targets(
 
         _ratio_clamped = float(np.clip(_ratio, 0.0, 10.0))
         log.info(
-            "LocalRescale [%s]: ratio=%.3f → clamped=%.3f  "
-            "claire_p95=%.3fmm  xfer_p95=%.3fmm  local_t=%d  local_c=%d  APPLYING.",
-            _rname, _ratio, _ratio_clamped,
-            _claire_p95 * 1000, _xfer_p95 * 1000, _n_local_t, _n_local_c,
+            "LocalRescale [%s]: p95_claire=%.4fmm, p95_target=%.4fmm, "
+            "using %s with ref=%.4fmm and ratio=%.3f (clamped=%.3f)  "
+            "local_t=%d  local_c=%d  APPLYING.",
+            _rname, _claire_p95 * 1000, _xfer_p95 * 1000,
+            "smile fallback" if (_is_smile and _p95_ref > _claire_p95 + 1e-7) else "local rescale",
+            _p95_ref * 1000, _ratio, _ratio_clamped, _n_local_t, _n_local_c,
         )
         target_morph_targets[_rname] = _xfer_disp * _ratio_clamped
+
+    # ── Smile mean-boost safeguard ───────────────────────────────────────────
+    # If, after local rescaling, a smile shape's local mean displacement is
+    # still below SMILE_LOCAL_MEAN_TARGET, scale its local vertices up toward
+    # that target — but only when the global jaw ratio is within a sane range
+    # so we don't try to compensate for a fundamentally broken transfer.
+    _jaw_ratio_ok = jaw_ratio is not None and 0.3 <= jaw_ratio <= 2.0
+    for _sname, _slm_idx in [("mouthSmileLeft", 61), ("mouthSmileRight", 291)]:
+        if _sname not in target_morph_targets:
+            continue
+        if not _jaw_ratio_ok:
+            log.info(
+                "LocalRescale [%s]: skipping mean boost — jaw_ratio=%s outside [0.3, 2.0].",
+                _sname, f"{jaw_ratio:.3f}" if jaw_ratio is not None else "N/A",
+            )
+            continue
+
+        # Recompute anchor / local mask (same logic as local rescale loop above).
+        _anchor_s = np.array(_LANDMARK_TO_CLAIRE_POS[_slm_idx])
+        if _landmark_anchors is not None:
+            _k_s = _lm_key_list.index(_slm_idx)
+            _anchor_s_t = target_verts[_landmark_anchors[0][_k_s]]
+        else:
+            _anchor_s_t = _anchor_s.copy()
+
+        _dists_s = np.linalg.norm(target_verts - _anchor_s_t, axis=1)
+        _local_s = _dists_s <= _RESCALE_RADIUS_M
+
+        if int(_local_s.sum()) < 3:
+            continue
+
+        _sdisp = target_morph_targets[_sname]
+        _local_mean = float(np.linalg.norm(_sdisp[_local_s], axis=1).mean())
+
+        if _local_mean < SMILE_LOCAL_MEAN_TARGET:
+            _boost = float(np.clip(
+                SMILE_LOCAL_MEAN_TARGET / max(_local_mean, 1e-6),
+                SMILE_MEAN_BOOST_MIN, SMILE_MEAN_BOOST_MAX,
+            ))
+            log.info(
+                "LocalRescale [%s]: boosting local mean from %.4fmm to %.4fmm (scale=%.3f).",
+                _sname, _local_mean * 1000, _local_mean * _boost * 1000, _boost,
+            )
+            _boosted = _sdisp.copy()
+            _boosted[_local_s] *= _boost
+            target_morph_targets[_sname] = _boosted
+        else:
+            log.info(
+                "LocalRescale [%s]: local mean=%.4fmm ≥ %.1fmm target — no boost needed.",
+                _sname, _local_mean * 1000, SMILE_LOCAL_MEAN_TARGET * 1000,
+            )
 
     # ── Shape-specific displacement validation (post-rescaling) ─────────────────
     for _vname, _thresh_m, _label in [
@@ -1068,3 +1153,293 @@ def transfer_morph_targets(
         process=False,
     )
     return rigged, target_morph_targets
+
+
+# ===========================================================================
+# Partition-of-Unity RBF (POU-RBF) morph target transfer
+# ===========================================================================
+
+# Canonical anatomical anchor positions for Claire (metres, centred at origin).
+# Used to build Claire's per-vertex region mask without running MediaPipe on her.
+_CLAIRE_REGION_ANCHORS: list[tuple[float, float, float]] = [
+    (-0.030,  0.020,  0.040),  # 0 left_eye
+    ( 0.030,  0.020,  0.040),  # 1 right_eye
+    ( 0.000, -0.005,  0.055),  # 2 nose
+    ( 0.000, -0.030,  0.040),  # 3 mouth
+    (-0.030,  0.040,  0.030),  # 4 left_brow
+    ( 0.030,  0.040,  0.030),  # 5 right_brow
+    ( 0.000,  0.070,  0.020),  # 6 forehead
+    (-0.045, -0.008,  0.025),  # 7 left_cheek
+    ( 0.045, -0.008,  0.025),  # 8 right_cheek
+    ( 0.000, -0.060,  0.015),  # 9 jaw
+]
+
+# Region label → blendshape names that primarily affect that region.
+REGION_BLENDSHAPES: dict[int, list[str]] = {
+    0: [  # left_eye
+        "eyeBlinkLeft", "eyeLookDownLeft", "eyeLookInLeft",
+        "eyeLookOutLeft", "eyeLookUpLeft", "eyeSquintLeft", "eyeWideLeft",
+    ],
+    1: [  # right_eye
+        "eyeBlinkRight", "eyeLookDownRight", "eyeLookInRight",
+        "eyeLookOutRight", "eyeLookUpRight", "eyeSquintRight", "eyeWideRight",
+    ],
+    2: [  # nose
+        "noseSneerLeft", "noseSneerRight",
+    ],
+    3: [  # mouth (central)
+        "mouthClose", "mouthFunnel", "mouthPucker",
+        "mouthLeft", "mouthRight",
+        "mouthRollLower", "mouthRollUpper",
+        "mouthShrugLower", "mouthShrugUpper",
+        "tongueOut",
+    ],
+    4: [  # left_brow
+        "browDownLeft", "browOuterUpLeft",
+    ],
+    5: [  # right_brow
+        "browDownRight", "browOuterUpRight",
+    ],
+    6: [  # forehead
+        "browInnerUp",
+    ],
+    7: [  # left_cheek
+        "cheekSquintLeft", "cheekPuff",
+        "mouthSmileLeft", "mouthDimpleLeft",
+        "mouthFrownLeft", "mouthStretchLeft",
+        "mouthPressLeft", "mouthLowerDownLeft", "mouthUpperUpLeft",
+    ],
+    8: [  # right_cheek
+        "cheekSquintRight",
+        "mouthSmileRight", "mouthDimpleRight",
+        "mouthFrownRight", "mouthStretchRight",
+        "mouthPressRight", "mouthLowerDownRight", "mouthUpperUpRight",
+    ],
+    9: [  # jaw
+        "jawOpen", "jawForward", "jawLeft", "jawRight",
+    ],
+}
+
+# Inverse map: blendshape name → list of region indices it primarily affects.
+_BLENDSHAPE_REGIONS: dict[str, list[int]] = {}
+for _r_idx, _bs_list in REGION_BLENDSHAPES.items():
+    for _bs_name in _bs_list:
+        _BLENDSHAPE_REGIONS.setdefault(_bs_name, []).append(_r_idx)
+# Any blendshape not in REGION_BLENDSHAPES gets global treatment (all regions).
+for _bs_name in ARKIT_BLENDSHAPES:
+    if _bs_name not in _BLENDSHAPE_REGIONS:
+        _BLENDSHAPE_REGIONS[_bs_name] = list(range(10))
+
+# Shepard boundary-blend radius (metres).
+_POU_REGION_RADIUS_M: float = 0.030  # 30 mm
+
+# Cached Claire per-vertex region mask — computed lazily on first POU-RBF call.
+_claire_region_mask_cache: np.ndarray | None = None
+
+
+def _get_claire_region_mask() -> np.ndarray:
+    """Return (lazily compute) Claire's per-vertex region mask (0-9)."""
+    global _claire_region_mask_cache
+    if _claire_region_mask_cache is not None:
+        return _claire_region_mask_cache
+    if claire_neutral_m is None:
+        raise RuntimeError("Claire data not loaded.")
+    anchors = np.array(_CLAIRE_REGION_ANCHORS, dtype=np.float64)   # (10, 3)
+    dists = np.linalg.norm(
+        claire_neutral_m[:, np.newaxis, :] - anchors[np.newaxis, :, :],
+        axis=2,
+    )  # (V_claire, 10)
+    _claire_region_mask_cache = np.argmin(dists, axis=1).astype(np.int32)
+    log.info(
+        "Claire region mask: %s",
+        {i: int((_claire_region_mask_cache == i).sum()) for i in range(10)},
+    )
+    return _claire_region_mask_cache
+
+
+def transfer_morph_targets_pou_rbf(
+    aligned_head: trimesh.Trimesh,
+    alignment_meta: dict | None,
+    face_region_mask: np.ndarray,
+) -> tuple[trimesh.Trimesh, dict[str, np.ndarray]]:
+    """Partition-of-Unity RBF morph target transfer — no cross-region contamination.
+
+    For each blendshape, a local thin-plate-spline RBF is fitted using only
+    Claire's vertices in the blendshape's anatomical region.  The RBF is
+    evaluated only on the target vertices in that same region.  Vertices
+    outside the region receive zero displacement (hard localization), with
+    smooth Shepard-weighted blending at region boundaries.
+
+    Parameters
+    ----------
+    aligned_head : trimesh.Trimesh
+        ICP-aligned Meshy head (metres, centred at origin).
+    alignment_meta : dict | None
+        From align_icp — not used by POU-RBF but kept for signature parity.
+    face_region_mask : np.ndarray shape (N,) int
+        Per-vertex region label 0-9 from rigger.landmarks.detect_landmarks.
+
+    Returns
+    -------
+    (rigged_mesh, blendshapes) — identical format to transfer_morph_targets.
+    """
+    if claire_neutral_m is None or _claire_deltas_m is None:
+        raise RuntimeError(f"Claire blendshape data not loaded from '{BS_SKIN_PATH}'.")
+
+    try:
+        from scipy.interpolate import RBFInterpolator
+    except ImportError as exc:
+        raise ImportError("scipy.interpolate.RBFInterpolator required for POU-RBF.") from exc
+
+    target_verts = np.asarray(aligned_head.vertices, dtype=np.float64)
+    N = len(target_verts)
+    V_claire = len(claire_neutral_m)
+    claire_mask = _get_claire_region_mask()
+
+    # Full IDW tree for fallbacks
+    full_tree = KDTree(claire_neutral_m)
+
+    # Precompute Shepard blending weights: (N, 10)
+    shepard_w = _compute_pou_shepard_weights(target_verts, face_region_mask)
+
+    target_morph_targets: dict[str, np.ndarray] = {}
+
+    for name in ARKIT_BLENDSHAPES:
+        claire_disp = _claire_deltas_m.get(name, np.zeros((V_claire, 3), dtype=np.float64))
+        regions = _BLENDSHAPE_REGIONS.get(name, list(range(10)))
+
+        # Blendshapes that affect all regions → global IDW (no localization benefit)
+        if len(regions) >= 10:
+            target_disp = _transfer_idw(target_verts, claire_disp, full_tree, k=4)
+            target_morph_targets[name] = target_disp
+            continue
+
+        target_disp = np.zeros((N, 3), dtype=np.float64)
+
+        for r_idx in regions:
+            tgt_r_idx = np.where(face_region_mask == r_idx)[0]
+            if len(tgt_r_idx) == 0:
+                continue
+
+            # Claire control points: this region + slight expansion
+            claire_r_idx = np.where(claire_mask == r_idx)[0]
+
+            if len(claire_r_idx) < 4:
+                # Too few Claire CPs → IDW fallback for this region
+                log.warning(
+                    "POU-RBF [%s] region %d: %d Claire CPs < 4 — IDW fallback.",
+                    name, r_idx, len(claire_r_idx),
+                )
+                r_disp = _transfer_idw(target_verts[tgt_r_idx], claire_disp, full_tree, k=4)
+                target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
+                continue
+
+            cp_pos = claire_neutral_m[claire_r_idx]   # (K, 3)
+            cp_disp = claire_disp[claire_r_idx]        # (K, 3)
+            tgt_r_pos = target_verts[tgt_r_idx]        # (M, 3)
+
+            try:
+                rbf = RBFInterpolator(
+                    cp_pos, cp_disp,
+                    kernel="thin_plate_spline",
+                    degree=1,
+                    smoothing=1e-3,
+                )
+                r_disp = rbf(tgt_r_pos)   # (M, 3)
+            except Exception as exc:
+                log.warning(
+                    "POU-RBF [%s] region %d RBF failed (%s) — IDW fallback.",
+                    name, r_idx, exc,
+                )
+                r_disp = _transfer_idw(tgt_r_pos, claire_disp, full_tree, k=4)
+
+            # Accumulate with Shepard weight for this region
+            target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
+
+        target_morph_targets[name] = target_disp
+        mags = np.linalg.norm(target_disp, axis=1)
+        log.info(
+            "POU-RBF %-30s  mean=%.5fm  max=%.5fm  nonzero=%d/%d",
+            name, mags.mean(), mags.max(), int((mags > 1e-9).sum()), N,
+        )
+
+    # Upper-face anchoring: remove rigid offset from lower-face blendshapes
+    # (same correction as the classic pipeline)
+    _LOWER_FACE: frozenset[str] = frozenset({
+        "jawOpen", "jawForward", "jawLeft", "jawRight",
+        "mouthClose", "mouthDimpleLeft", "mouthDimpleRight",
+        "mouthFrownLeft", "mouthFrownRight", "mouthFunnel",
+        "mouthLeft", "mouthRight", "mouthLowerDownLeft", "mouthLowerDownRight",
+        "mouthPressLeft", "mouthPressRight", "mouthPucker",
+        "mouthRollLower", "mouthRollUpper", "mouthShrugLower", "mouthShrugUpper",
+        "mouthSmileLeft", "mouthSmileRight", "mouthStretchLeft", "mouthStretchRight",
+        "mouthUpperUpLeft", "mouthUpperUpRight",
+        "cheekPuff", "cheekSquintLeft", "cheekSquintRight",
+        "noseSneerLeft", "noseSneerRight", "tongueOut",
+    })
+    y_arr = target_verts[:, 1]
+    upper_thresh = float(y_arr.min()) + 0.60 * float(y_arr.max() - y_arr.min())
+    upper_mask = y_arr > upper_thresh
+    n_upper = int(upper_mask.sum())
+    if n_upper > 5:
+        anchored = 0
+        for _name in _LOWER_FACE:
+            disp = target_morph_targets.get(_name)
+            if disp is None:
+                continue
+            mean_upper = disp[upper_mask].mean(axis=0)
+            if float(np.linalg.norm(mean_upper)) > 5e-5:
+                target_morph_targets[_name] = disp - mean_upper
+                anchored += 1
+        if anchored:
+            log.info("POU-RBF: upper-face anchoring applied to %d shapes.", anchored)
+
+    log.info("All 52 morph targets transferred via POU-RBF.")
+    rigged = trimesh.Trimesh(
+        vertices=target_verts.copy(),
+        faces=np.array(aligned_head.faces),
+        process=False,
+    )
+    return rigged, target_morph_targets
+
+
+def _compute_pou_shepard_weights(
+    target_verts: np.ndarray,
+    face_region_mask: np.ndarray,
+) -> np.ndarray:
+    """Compute (N, 10) Shepard blend weights for smooth region boundaries.
+
+    For each vertex, the weight for its own region is 1.0.
+    For adjacent regions, weight = max(0, R - dist(v, region_centroid)).
+    Normalised per-vertex so weights sum to 1.
+
+    When a vertex is deep inside a region, w[own]=1, all others=0 → hard assign.
+    Near a boundary, neighbouring region weights become non-zero → smooth blend.
+    """
+    N = len(target_verts)
+    n_regions = 10
+    R = _POU_REGION_RADIUS_M
+
+    # Compute region centroids from target vertices
+    centroids = np.zeros((n_regions, 3), dtype=np.float64)
+    for r in range(n_regions):
+        idx = np.where(face_region_mask == r)[0]
+        if len(idx) > 0:
+            centroids[r] = target_verts[idx].mean(axis=0)
+        # else centroid stays at origin — will get near-zero weight from distance
+
+    # Shepard: w_i(x) = max(0, R - dist(x, c_i)) / (R * max(dist(x, c_i), 1e-6))
+    raw_w = np.zeros((N, n_regions), dtype=np.float64)
+    for r in range(n_regions):
+        d = np.linalg.norm(target_verts - centroids[r], axis=1)  # (N,)
+        raw_w[:, r] = np.maximum(0.0, R - d) / (R * np.maximum(d, 1e-6))
+
+    # Vertices in region r: force their own weight to at least 1.0 before normalising
+    for r in range(n_regions):
+        own = face_region_mask == r
+        raw_w[own, r] = np.maximum(raw_w[own, r], 1.0)
+
+    # Normalise rows to sum = 1
+    row_sum = raw_w.sum(axis=1, keepdims=True)
+    row_sum = np.where(row_sum > 1e-12, row_sum, 1.0)
+    return raw_w / row_sum

@@ -16,8 +16,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
+import json
+
 from rigger.aligner import align_icp
 from rigger.glb_writer import patch_glb_add_morph_targets
+from rigger.landmarks import detect_landmarks
 from rigger.mouth_slit import cut_mouth_slit
 from rigger.separator import _find_jaw_cutoff_geometric, separate_head_body
 from rigger.transfer import (
@@ -26,6 +29,7 @@ from rigger.transfer import (
     _claire_deltas_m,
     claire_neutral_m,
     transfer_morph_targets,
+    transfer_morph_targets_pou_rbf,
 )
 
 TMP_DIR = Path("tmp")
@@ -167,12 +171,24 @@ async def get_preview(temp_id: str) -> FileResponse:
     return FileResponse(path=str(tmp_path), media_type="model/gltf-binary")
 
 
+@app.get("/validate/{rig_id}")
+async def validate_rig(rig_id: str) -> JSONResponse:
+    """Return per-blendshape validation data (mean displacement + pass/fail) for a rigged GLB."""
+    if not re.match(r"^[0-9a-f\-]+$", rig_id):
+        raise HTTPException(status_code=400, detail="Invalid rig_id.")
+    path = TMP_DIR / f"{rig_id}.validate.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Validation data not found or expired.")
+    return JSONResponse(json.loads(path.read_text()))
+
+
 @app.post("/rig")
 async def rig(
     file: Optional[UploadFile] = File(None),
     temp_id: Optional[str] = Form(None),
     y_back: Optional[float] = Form(None),
     y_front: Optional[float] = Form(None),
+    use_pou_rbf: bool = Form(True),
 ) -> FileResponse:
     # Determine the source GLB bytes.
     if temp_id is not None:
@@ -197,7 +213,10 @@ async def rig(
         )
 
     source_name = f"temp:{temp_id}" if temp_id else (file.filename if file else "unknown")
-    log.info("Rig request: source=%s  y_back=%s  y_front=%s", source_name, y_back, y_front)
+    log.info(
+        "Rig request: source=%s  y_back=%s  y_front=%s  use_pou_rbf=%s",
+        source_name, y_back, y_front, use_pou_rbf,
+    )
     log.info("Read %d bytes.", len(glb_bytes))
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -215,11 +234,41 @@ async def rig(
             log.info("Cutting mouth slit (topological upper/lower lip separation)...")
             head_mesh = cut_mouth_slit(head_mesh)
 
+            log.info("Detecting MediaPipe landmarks for enhanced alignment...")
+            lm_result = None
+            try:
+                lm_result = detect_landmarks(head_mesh)
+                if lm_result is not None:
+                    log.info("Landmarks detected — using landmark-NICP alignment.")
+                else:
+                    log.info("Landmark detection returned None — falling back to rigid ICP.")
+            except Exception as _lm_exc:
+                log.warning("Landmark detection raised an exception: %s", _lm_exc)
+
             log.info("Aligning head to Claire neutral via ICP...")
-            aligned_head, alignment_meta = align_icp(head_mesh)
+            aligned_head, alignment_meta = align_icp(head_mesh, landmarks=lm_result)
+
+            # Re-detect landmarks on aligned mesh for POU-RBF region mask
+            aligned_lm_result = None
+            if use_pou_rbf:
+                try:
+                    aligned_lm_result = detect_landmarks(aligned_head)
+                    if aligned_lm_result is not None:
+                        log.info("Aligned-mesh landmarks detected — POU-RBF enabled.")
+                    else:
+                        log.info("Aligned-mesh landmark detection failed — falling back to classic transfer.")
+                except Exception as _alm_exc:
+                    log.warning("Aligned landmark detection raised: %s", _alm_exc)
 
             log.info("Transferring 52 ARKit morph targets...")
-            rigged_head, blendshapes = transfer_morph_targets(aligned_head, alignment_meta)
+            if use_pou_rbf and aligned_lm_result is not None:
+                rigged_head, blendshapes = transfer_morph_targets_pou_rbf(
+                    aligned_head,
+                    alignment_meta,
+                    aligned_lm_result["face_region_mask"],
+                )
+            else:
+                rigged_head, blendshapes = transfer_morph_targets(aligned_head, alignment_meta)
 
             # Transform blendshape displacements from ICP-aligned space back to
             # original model space.
@@ -250,10 +299,17 @@ async def rig(
         # ── Output validation ────────────────────────────────────────────────
         log.info("=== Output validation ===")
         all_pass = True
+        validation_data: dict[str, dict] = {}
         for name in _KEY_BLENDSHAPES:
             delta = blendshapes_orig.get(name, np.zeros((1, 3)))
             mean_mag = float(np.linalg.norm(delta, axis=1).mean())
-            if mean_mag < 0.001:
+            passed = mean_mag >= 0.001
+            validation_data[name] = {
+                "mean_displacement_m": round(mean_mag, 6),
+                "mean_displacement_mm": round(mean_mag * 1000, 3),
+                "pass": passed,
+            }
+            if not passed:
                 log.warning("VALIDATION FAIL: %s mean=%.6fm < 0.001m", name, mean_mag)
                 all_pass = False
             else:
@@ -267,15 +323,22 @@ async def rig(
         final_path = Path(tempfile.mktemp(suffix=".glb"))
         final_path.write_bytes(output_path.read_bytes())
 
+        # Persist validation JSON and rigged GLB copy so /validate/{rig_id} can serve them.
+        rig_id = str(uuid.uuid4())
+        _validate_path = TMP_DIR / f"{rig_id}.validate.json"
+        _validate_path.write_text(json.dumps(validation_data))
+        asyncio.get_event_loop().create_task(_delete_after_delay(_validate_path, 600.0))
+
     # Clean up the temp preview file now that rigging is done.
     if temp_id is not None:
         _delete_file(TMP_DIR / f"{temp_id}.glb")
 
-    log.info("Returning rigged GLB: %s", final_path)
+    log.info("Returning rigged GLB: %s  rig_id=%s", final_path, rig_id)
     return FileResponse(
         path=str(final_path),
         media_type="model/gltf-binary",
         filename="rigged_output.glb",
+        headers={"X-Rig-Id": rig_id, "Access-Control-Expose-Headers": "X-Rig-Id"},
         background=BackgroundTask(_delete_file, final_path),
     )
 
