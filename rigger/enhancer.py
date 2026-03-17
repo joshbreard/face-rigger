@@ -74,6 +74,97 @@ def _decode_gltf_accessor(
     return out
 
 
+def _closest_point_on_triangles(
+    points: np.ndarray,
+    triangles: np.ndarray,
+) -> np.ndarray:
+    """Vectorized closest point on triangle for N paired (point, triangle).
+
+    Uses the Voronoi-region algorithm from Ericson, *Real-Time Collision
+    Detection* §5.1.5.
+
+    Parameters
+    ----------
+    points : (N, 3) float64
+    triangles : (N, 3, 3) float64 – per-point triangle vertices
+
+    Returns
+    -------
+    (N, 3) float64 – closest point on each triangle
+    """
+    A = triangles[:, 0]
+    B = triangles[:, 1]
+    C = triangles[:, 2]
+
+    ab = B - A
+    ac = C - A
+    ap = points - A
+    bp = points - B
+    cp = points - C
+
+    d1 = (ab * ap).sum(axis=1)
+    d2 = (ac * ap).sum(axis=1)
+    d3 = (ab * bp).sum(axis=1)
+    d4 = (ac * bp).sum(axis=1)
+    d5 = (ab * cp).sum(axis=1)
+    d6 = (ac * cp).sum(axis=1)
+
+    vc = d1 * d4 - d3 * d2
+    vb = d5 * d2 - d1 * d6
+    va = d3 * d6 - d5 * d4
+
+    N = len(points)
+    result = np.zeros((N, 3), dtype=np.float64)
+    todo = np.ones(N, dtype=bool)
+
+    # Vertex A
+    m = todo & (d1 <= 0) & (d2 <= 0)
+    result[m] = A[m]; todo &= ~m
+
+    # Vertex B
+    m = todo & (d3 >= 0) & (d4 <= d3)
+    result[m] = B[m]; todo &= ~m
+
+    # Edge AB
+    m = todo & (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+    if m.any():
+        denom = d1[m] - d3[m]
+        v = np.where(np.abs(denom) > 1e-12, d1[m] / denom, 0.5)
+        result[m] = A[m] + v[:, None] * ab[m]
+    todo &= ~m
+
+    # Vertex C
+    m = todo & (d6 >= 0) & (d5 <= d6)
+    result[m] = C[m]; todo &= ~m
+
+    # Edge AC
+    m = todo & (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+    if m.any():
+        denom = d2[m] - d6[m]
+        w = np.where(np.abs(denom) > 1e-12, d2[m] / denom, 0.5)
+        result[m] = A[m] + w[:, None] * ac[m]
+    todo &= ~m
+
+    # Edge BC
+    m = todo & (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)
+    if m.any():
+        denom = (d4[m] - d3[m]) + (d5[m] - d6[m])
+        w = np.where(np.abs(denom) > 1e-12, (d4[m] - d3[m]) / denom, 0.5)
+        result[m] = B[m] + w[:, None] * (C[m] - B[m])
+    todo &= ~m
+
+    # Face interior
+    m = todo
+    if m.any():
+        denom = va[m] + vb[m] + vc[m]
+        safe = np.where(np.abs(denom) > 1e-12, denom, 1.0)
+        v = vb[m] / safe
+        w = vc[m] / safe
+        result[m] = A[m] + v[:, None] * ab[m] + w[:, None] * ac[m]
+
+    return result
+
+
 class MeshEnhancer:
     """Region-aware head mesh enhancer for face rigging."""
 
@@ -472,15 +563,16 @@ class MeshEnhancer:
     def _project_uvs(self, out_gltf_path, source_glb_path, enhanced_vertices):
         """Transfer UVs from source GLB to the enhanced mesh.
 
-        Uses per-face centroid proximity so that all three vertices of
-        each enhanced face are UV-mapped via the *same* source triangle,
-        preventing within-face UV seam crossings.  Vertices at UV seam
-        boundaries are then duplicated so the glTF index buffer can
-        represent the discontinuity cleanly.
+        Uses a KDTree of source triangle centroids to find the closest
+        source triangle per enhanced *face* (not per vertex).  All three
+        vertices of each enhanced face share the same source triangle,
+        preventing within-face UV seam crossings.  The centroid KDTree
+        keeps lookups local so the nose bridge cannot jump to the wrong
+        side.  Vertices at UV seam boundaries are then duplicated so the
+        glTF index buffer can represent the discontinuity cleanly.
         """
         import pygltflib, copy
         import numpy as np
-        from trimesh.proximity import closest_point as _closest_point
 
         # --- 1. Read source UVs, vertices, and face indices ---
         src = pygltflib.GLTF2.load(source_glb_path)
@@ -513,10 +605,10 @@ class MeshEnhancer:
             src, src_prim.indices, src_blob,
         ).reshape(-1, 3).astype(np.int32)
 
-        # --- 2. Build source trimesh for proximity queries ---
-        src_mesh = trimesh.Trimesh(
-            vertices=src_verts, faces=src_faces, process=False,
-        )
+        # --- 2. Build triangle centroid KDTree for local proximity ---
+        src_tri_verts = src_verts[src_faces]            # (T, 3, 3)
+        src_centroids = src_tri_verts.mean(axis=1)      # (T, 3)
+        centroid_tree = KDTree(src_centroids)
 
         # --- 3. Load output GLB to get enhanced face topology ---
         out = pygltflib.GLTF2.load(out_gltf_path)
@@ -526,24 +618,47 @@ class MeshEnhancer:
             out, enh_prim.indices, out_blob_raw,
         ).reshape(-1, 3).astype(np.int32)
 
-        # --- 4. Per-face barycentric UV transfer ---
+        # --- 4. Per-face centroid-KDTree UV transfer ---
         # For each enhanced face, find the closest source triangle to
-        # the face *centroid*.  All three vertices of the face are then
-        # UV-interpolated via that single source triangle so the result
-        # never straddles a UV seam within one face.
+        # the face *centroid* via the centroid KDTree.  All three vertices
+        # of the face are UV-interpolated via that single source triangle
+        # so the result never straddles a UV seam within one face.
+        # The centroid KDTree keeps lookups local and prevents the nose
+        # bridge from jumping to triangles on the opposite side.
+        _K_NEIGHBORS = 8
         face_verts = enhanced_vertices[enh_faces]       # (F, 3, 3)
         face_centroids = face_verts.mean(axis=1)        # (F, 3)
+        n_faces = len(face_centroids)
 
-        _, _, face_tri_ids = _closest_point(src_mesh, face_centroids)
+        _, tri_candidates = centroid_tree.query(
+            face_centroids, k=_K_NEIGHBORS,
+        )
 
+        # Pick the candidate whose actual centroid-to-triangle distance
+        # is smallest (centroid KDTree distance is only an approximation).
+        cents_exp = np.repeat(face_centroids, _K_NEIGHBORS, axis=0)
+        tris_exp = src_tri_verts[tri_candidates.ravel()]
+        cp_exp = _closest_point_on_triangles(
+            cents_exp.astype(np.float64), tris_exp.astype(np.float64),
+        )
+        dists = np.linalg.norm(cents_exp - cp_exp, axis=1).reshape(
+            n_faces, _K_NEIGHBORS,
+        )
+        best_k = np.argmin(dists, axis=1)
+        face_tri_ids = tri_candidates[np.arange(n_faces), best_k]
+
+        # Assign all 3 vertices of each face to the same source triangle
         all_face_verts = face_verts.reshape(-1, 3)      # (F*3, 3)
         all_tri_ids = np.repeat(face_tri_ids, 3)        # (F*3,)
 
-        bary = trimesh.triangles.points_to_barycentric(
-            src_mesh.triangles[all_tri_ids], all_face_verts,
+        # Closest point on the assigned triangle for each vertex
+        all_tris = src_tri_verts[all_tri_ids]            # (F*3, 3, 3)
+        all_cp = _closest_point_on_triangles(
+            all_face_verts.astype(np.float64), all_tris.astype(np.float64),
         )
-        # Clamp negative bary coords (vertex outside its face's source
-        # triangle) and renormalise so weights sum to 1.
+        bary = trimesh.triangles.points_to_barycentric(
+            all_tris, all_cp,
+        )
         bary = np.clip(bary, 0.0, None)
         nan_mask = np.isnan(bary).any(axis=1)
         if nan_mask.any():
