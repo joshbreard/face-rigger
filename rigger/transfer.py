@@ -19,6 +19,7 @@ subtraction of neutral is needed.
 
 import logging
 import os
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -1391,10 +1392,19 @@ def transfer_morph_targets_pou_rbf(
         for name in ARKIT_BLENDSHAPES
     ]
 
-    log.info("POU-RBF: dispatching 52 blendshapes to ProcessPoolExecutor (workers=%d).",
-             os.cpu_count())
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        results = list(executor.map(_pou_rbf_single_worker, worker_args))
+    _BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 4))
+    log.info(
+        "POU-RBF: dispatching 52 blendshapes in batches of %d (BATCH_SIZE=%d).",
+        _BATCH_SIZE, _BATCH_SIZE,
+    )
+    results: list[tuple[str, np.ndarray]] = []
+    with ProcessPoolExecutor(max_workers=_BATCH_SIZE) as executor:
+        for batch_start in range(0, len(worker_args), _BATCH_SIZE):
+            batch = worker_args[batch_start : batch_start + _BATCH_SIZE]
+            batch_results = list(executor.map(_pou_rbf_single_worker, batch))
+            results.extend(batch_results)
+            if batch_start + _BATCH_SIZE < len(worker_args):
+                time.sleep(0.1)
 
     # Reassemble in canonical order and log per-shape stats.
     _CHECK_SHAPES = {"eyeBlinkLeft", "eyeBlinkRight", "mouthSmileLeft", "mouthSmileRight"}
