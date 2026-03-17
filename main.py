@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import struct
 import tempfile
 import uuid
@@ -24,6 +25,7 @@ import json
 
 from rigger.aligner import align_icp
 from rigger.controller import rig_with_retries, SCORE_OK, MAX_ATTEMPTS
+from rigger.enhancer import EnhancerLandmarkError, MeshEnhancer
 from rigger.glb_writer import patch_glb_add_morph_targets
 from rigger.landmarks import detect_landmarks
 from rigger.mouth_slit import cut_mouth_slit
@@ -184,6 +186,90 @@ async def get_preview(temp_id: str) -> FileResponse:
     return FileResponse(path=str(tmp_path), media_type="model/gltf-binary")
 
 
+@app.post("/enhance")
+async def enhance(
+    file: Optional[UploadFile] = File(None),
+    temp_id: Optional[str] = Form(None),
+    neck_cutoff_y: float = Form(...),
+    neck_cutoff_z_min: float = Form(...),
+    neck_cutoff_z_max: float = Form(...),
+):
+    """Stage 0: enhance the head mesh before rigging.
+
+    Accepts either an uploaded GLB or a temp_id from /preview.
+    Returns the enhanced GLB URL and enhancement stats.
+    """
+    if temp_id is not None:
+        tmp_file = TMP_DIR / f"{temp_id}.glb"
+        if not tmp_file.exists():
+            raise HTTPException(status_code=404, detail="Temp file not found — please re-upload.")
+        glb_path = str(tmp_file)
+    elif file is not None:
+        if not file.filename or not file.filename.lower().endswith(".glb"):
+            raise HTTPException(status_code=400, detail="Uploaded file must be a .glb file.")
+        glb_bytes = await file.read()
+        enhance_id = str(uuid.uuid4())
+        tmp_path = TMP_DIR / f"{enhance_id}.glb"
+        tmp_path.write_bytes(glb_bytes)
+        asyncio.get_event_loop().create_task(_delete_after_delay(tmp_path, 600.0))
+        glb_path = str(tmp_path)
+    else:
+        raise HTTPException(status_code=400, detail="Provide a .glb file or a temp_id.")
+
+    log.info(
+        "Enhance request: source=%s  neck_cutoff_y=%.4f  z_range=[%.4f, %.4f]",
+        f"temp:{temp_id}" if temp_id else (file.filename if file else "unknown"),
+        neck_cutoff_y, neck_cutoff_z_min, neck_cutoff_z_max,
+    )
+
+    def _run_enhance() -> tuple[str, dict]:
+        enhancer = MeshEnhancer()
+        enhanced_path, stats = enhancer.enhance(
+            glb_path=glb_path,
+            neck_cutoff_y=neck_cutoff_y,
+            neck_cutoff_z_range=(neck_cutoff_z_min, neck_cutoff_z_max),
+        )
+        return enhanced_path, stats
+
+    try:
+        loop = asyncio.get_event_loop()
+        enhanced_path, stats = await loop.run_in_executor(None, _run_enhance)
+    except EnhancerLandmarkError as exc:
+        log.warning("Enhance landmark detection failed: %s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("Enhance pipeline failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Copy enhanced GLB to tmp dir with a stable ID
+    enhanced_id = str(uuid.uuid4())
+    dest = TMP_DIR / f"{enhanced_id}.glb"
+
+    shutil.copy2(enhanced_path, dest)
+    # Clean up the temp enhancer output
+    Path(enhanced_path).unlink(missing_ok=True)
+
+    asyncio.get_event_loop().create_task(_delete_after_delay(dest, 600.0))
+
+    log.info("Enhance complete: enhanced_id=%s  stats=%s", enhanced_id, stats)
+    return JSONResponse({
+        "enhanced_glb_url": f"/tmp/{enhanced_id}/enhanced.glb",
+        "enhanced_temp_id": enhanced_id,
+        "stats": stats,
+    })
+
+
+@app.get("/tmp/{enhanced_id}/enhanced.glb")
+async def get_enhanced_glb(enhanced_id: str) -> FileResponse:
+    """Serve the enhanced GLB for review."""
+    if not re.match(r"^[0-9a-f\-]+$", enhanced_id):
+        raise HTTPException(status_code=400, detail="Invalid enhanced_id.")
+    glb_path = TMP_DIR / f"{enhanced_id}.glb"
+    if not glb_path.exists():
+        raise HTTPException(status_code=404, detail="Enhanced GLB not found or expired.")
+    return FileResponse(path=str(glb_path), media_type="model/gltf-binary")
+
+
 @app.get("/validate/{rig_id}")
 async def validate_rig(rig_id: str) -> JSONResponse:
     """Return per-blendshape validation data (mean displacement + pass/fail) for a rigged GLB."""
@@ -253,9 +339,16 @@ async def rig(
     y_back: Optional[float] = Form(None),
     y_front: Optional[float] = Form(None),
     use_pou_rbf: bool = Form(True),
+    enhanced_glb: Optional[str] = Form(None),
 ):
-    # Determine the source GLB bytes.
-    if temp_id is not None:
+    # If an enhanced GLB temp_id is provided, use it directly (skip Stage 0).
+    if enhanced_glb is not None:
+        enhanced_path = TMP_DIR / f"{enhanced_glb}.glb"
+        if not enhanced_path.exists():
+            raise HTTPException(status_code=404, detail="Enhanced GLB not found or expired.")
+        glb_bytes = enhanced_path.read_bytes()
+        log.info("Rig request: using pre-enhanced GLB (enhanced_id=%s)", enhanced_glb)
+    elif temp_id is not None:
         tmp_file = TMP_DIR / f"{temp_id}.glb"
         if not tmp_file.exists():
             raise HTTPException(status_code=404, detail="Temp file not found — please re-upload.")

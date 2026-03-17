@@ -749,6 +749,198 @@
       transform: translate(-50%, -50%);
     }
 
+    /* ── Enhancer review section ──────────────────────────────────────── */
+    #enhance-section {
+      display: none;
+      flex-direction: column;
+      gap: 14px;
+      width: 100%;
+    }
+    #enhance-viewport-wrap {
+      position: relative;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0d0d0f;
+    }
+    #enhance-panel {
+      display: grid;
+      grid-template-columns: 1fr 260px;
+      gap: 16px;
+      height: 480px;
+    }
+    #enhance-canvas-wrap {
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0d0d0f;
+      position: relative;
+    }
+    #enhance-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      transition: opacity 0.2s ease;
+    }
+    #enhance-loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+      background: rgba(13, 13, 15, 0.88);
+      z-index: 5;
+      font-size: 0.85rem;
+      color: #9090a8;
+    }
+    #enhance-loading-overlay .spinner {
+      width: 32px; height: 32px; border-width: 2.5px;
+    }
+    #enhance-elapsed {
+      font-family: monospace;
+      font-size: 0.78rem;
+      color: #6b6b75;
+    }
+    /* Stats sidebar */
+    #enhance-stats-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      background: #111114;
+      border: 1px solid #22222a;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    #enhance-stats-header {
+      padding: 10px 14px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #55556a;
+      border-bottom: 1px solid #22222a;
+      flex-shrink: 0;
+    }
+    #enhance-stats-list {
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1;
+    }
+    .enh-stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.8rem;
+    }
+    .enh-stat-label {
+      color: #9090a8;
+    }
+    .enh-stat-value {
+      font-family: monospace;
+      font-size: 0.78rem;
+      color: #e2e2e5;
+      font-weight: 500;
+    }
+    /* Before/After toggle */
+    .enh-toggle-group {
+      display: flex;
+      gap: 0;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid #2a2a30;
+    }
+    .enh-toggle-btn {
+      padding: 6px 16px;
+      font-size: 0.78rem;
+      font-weight: 500;
+      border: none;
+      cursor: pointer;
+      transition: all 0.15s;
+      background: #1a1a20;
+      color: #6b6b75;
+    }
+    .enh-toggle-btn.active {
+      background: rgba(110, 110, 255, 0.12);
+      color: #a0a0ff;
+    }
+    .enh-toggle-btn:hover:not(.active) {
+      background: rgba(255, 255, 255, 0.04);
+    }
+    /* Density map toggle */
+    .enh-density-btn {
+      background: #1e1e24;
+      border: 1px solid #2a2a35;
+      border-radius: 5px;
+      color: #8888a0;
+      font-size: 0.72rem;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .enh-density-btn.active {
+      background: rgba(110, 110, 255, 0.12);
+      border-color: #6e6eff;
+      color: #a0a0ff;
+    }
+    /* Toolbar row */
+    .enh-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    /* Action buttons */
+    .enh-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    #enh-approve-btn {
+      background: #22c55e;
+      color: #051a0e;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 22px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #enh-approve-btn:hover { background: #16a34a; }
+    #enh-rerun-btn {
+      background: transparent;
+      color: #6e6eff;
+      border: 1px solid #3a3a55;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #enh-rerun-btn:hover { background: rgba(91, 91, 255, 0.08); }
+    #enh-skip-link {
+      background: none;
+      border: none;
+      color: #6b6b75;
+      font-size: 0.75rem;
+      cursor: pointer;
+      text-decoration: underline;
+      padding: 4px;
+    }
+    #enh-skip-link:hover { color: #9090a8; }
+
+    @media (max-width: 680px) {
+      #enhance-panel {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      #enhance-canvas-wrap { height: 300px; }
+      #enhance-stats-panel { height: 260px; }
+    }
+
     /* ── Responsive collapse ───────────────────────────────────────────── */
     @media (max-width: 680px) {
       #preview-panel {
@@ -831,6 +1023,70 @@
             <button id="rig-it-btn">Rig It →</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ── Enhancer Review ── -->
+    <div id="enhance-section">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <p style="font-size:0.9rem;color:#c0c0d0;text-align:center;">
+          Review the enhanced mesh topology, then click <strong>Looks Good</strong> to proceed.
+        </p>
+      </div>
+
+      <div class="enh-toolbar">
+        <div class="enh-toggle-group">
+          <button class="enh-toggle-btn" id="enh-show-original">Original</button>
+          <button class="enh-toggle-btn active" id="enh-show-enhanced">Enhanced</button>
+        </div>
+        <button class="enh-density-btn" id="enh-density-toggle">Show Density Map</button>
+      </div>
+
+      <div id="enhance-panel">
+        <div id="enhance-canvas-wrap">
+          <canvas id="enhance-canvas"></canvas>
+          <div id="enhance-loading-overlay" style="display:none;">
+            <div class="spinner"></div>
+            <span id="enhance-loading-text">Enhancing mesh topology...</span>
+            <span id="enhance-elapsed">0.0s</span>
+          </div>
+        </div>
+
+        <div id="enhance-stats-panel">
+          <div id="enhance-stats-header">Enhancement Stats</div>
+          <div id="enhance-stats-list">
+            <div class="enh-stat-row">
+              <span class="enh-stat-label">Original verts</span>
+              <span class="enh-stat-value" id="enh-stat-orig-verts">—</span>
+            </div>
+            <div class="enh-stat-row">
+              <span class="enh-stat-label">Enhanced verts</span>
+              <span class="enh-stat-value" id="enh-stat-enh-verts">—</span>
+            </div>
+            <div class="enh-stat-row">
+              <span class="enh-stat-label">Eye density</span>
+              <span class="enh-stat-value" id="enh-stat-eye-density">—</span>
+            </div>
+            <div class="enh-stat-row">
+              <span class="enh-stat-label">Mouth density</span>
+              <span class="enh-stat-value" id="enh-stat-mouth-density">—</span>
+            </div>
+            <div class="enh-stat-row">
+              <span class="enh-stat-label">Eyeballs preserved</span>
+              <span class="enh-stat-value" id="enh-stat-eyeball-verts">—</span>
+            </div>
+            <div class="enh-stat-row">
+              <span class="enh-stat-label">Processing time</span>
+              <span class="enh-stat-value" id="enh-stat-time">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="enh-actions">
+        <button id="enh-skip-link">Skip Enhancement</button>
+        <button id="enh-rerun-btn">Re-run Enhancer</button>
+        <button id="enh-approve-btn">Looks Good → Rig It</button>
       </div>
     </div>
 
@@ -968,6 +1224,7 @@
     const spinnerSection   = document.getElementById('spinner-section');
     const spinnerLabel     = document.getElementById('spinner-label');
     const adjustSection    = document.getElementById('adjust-section');
+    const enhanceSection   = document.getElementById('enhance-section');
     const successSection   = document.getElementById('success-section');
     const humanSection     = document.getElementById('human-section');
     const errorSection     = document.getElementById('error-section');
@@ -1021,6 +1278,21 @@
     let planeMesh = null, backHandle = null, frontHandle = null;
     let planeXMin = -1, planeXMax = 1;
     let dragging = null;  // 'back' | 'front' | null
+
+    // Enhancer state
+    let enhancedGlbUrl = null;
+    let enhancedTempId = null;
+    let enhancerStats = null;
+    let enhancerLoading = false;
+    let enhRenderer = null, enhScene = null, enhCamera = null, enhControls = null;
+    let enhAnimId = null;
+    let enhLoadedScene = null;
+    let enhOriginalGlbUrl = null;  // blob URL for the original model in enhance view
+    let enhShowingOriginal = false;
+    let enhDensityMode = false;
+    let enhDensityMaterial = null;
+    let enhOriginalMaterials = new Map();  // mesh -> original material
+    let enhElapsedTimer = null;
 
     // Human-assist landmark annotation
     let humRenderer = null, humScene = null, humCamera = null, humControls = null;
@@ -1085,7 +1357,7 @@
 
     // ── Section switcher ────────────────────────────────────────────────
     function showSection(section) {
-      [uploadSection, spinnerSection, adjustSection, successSection, humanSection, errorSection].forEach(s => {
+      [uploadSection, spinnerSection, adjustSection, enhanceSection, successSection, humanSection, errorSection].forEach(s => {
         s.style.display = 'none';
       });
       section.style.display = 'flex';
@@ -1097,6 +1369,7 @@
       card.classList.remove('wide');
       _teardownRenderer();
       _teardownAdjustRenderer();
+      _teardownEnhanceRenderer();
       _teardownHumanRenderer();
       morphList.innerHTML = '';
       valRows.innerHTML = '';
@@ -1106,6 +1379,10 @@
       mvSliders.innerHTML = '';
       tempId = null;
       currentRigId = null;
+      enhancedGlbUrl = null;
+      enhancedTempId = null;
+      enhancerStats = null;
+      enhancerLoading = false;
       showSection(uploadSection);
     }
 
@@ -1166,17 +1443,95 @@
       }
     }
 
-    // ── "Rig It" → /rig ─────────────────────────────────────────────────
+    // ── "Rig It" → POST /enhance (Stage 0) then review ─────────────────
     rigItBtn.addEventListener('click', async () => {
+      _teardownAdjustRenderer();
+      // Show enhance section with loading overlay
+      card.classList.add('wide');
+      showSection(enhanceSection);
+      _startEnhanceRequest();
+    });
+
+    async function _startEnhanceRequest() {
+      enhancerLoading = true;
+      const overlay = document.getElementById('enhance-loading-overlay');
+      const elapsedEl = document.getElementById('enhance-elapsed');
+      const loadingText = document.getElementById('enhance-loading-text');
+      overlay.style.display = 'flex';
+      loadingText.textContent = 'Enhancing mesh topology...';
+
+      // Elapsed timer
+      const t0 = performance.now();
+      if (enhElapsedTimer) clearInterval(enhElapsedTimer);
+      enhElapsedTimer = setInterval(() => {
+        elapsedEl.textContent = ((performance.now() - t0) / 1000).toFixed(1) + 's';
+      }, 100);
+
+      // Init renderer with original model while we wait
+      _initEnhanceRenderer(`/preview/${tempId}`);
+      // Store blob URL for original
+      try {
+        const origResp = await fetch(`/preview/${tempId}`);
+        const origBlob = await origResp.blob();
+        enhOriginalGlbUrl = URL.createObjectURL(origBlob);
+      } catch (_) {}
+
+      const formData = new FormData();
+      formData.append('temp_id', tempId);
+      formData.append('neck_cutoff_y', yFront.toString());
+      formData.append('neck_cutoff_z_min', zMin.toString());
+      formData.append('neck_cutoff_z_max', zMax.toString());
+
+      try {
+        const response = await fetch('/enhance', { method: 'POST', body: formData });
+        if (!response.ok) {
+          let detail = `Server error ${response.status}`;
+          try { const j = await response.json(); detail = j.detail || detail; } catch (_) {}
+          throw new Error(detail);
+        }
+
+        const data = await response.json();
+        enhancedGlbUrl = data.enhanced_glb_url;
+        enhancedTempId = data.enhanced_temp_id;
+        enhancerStats = data.stats;
+
+        // Populate stats panel
+        _populateEnhanceStats(enhancerStats);
+
+        // Load enhanced mesh into viewport
+        _loadEnhanceModel(enhancedGlbUrl);
+
+        // Default to showing enhanced
+        enhShowingOriginal = false;
+        document.getElementById('enh-show-enhanced').classList.add('active');
+        document.getElementById('enh-show-original').classList.remove('active');
+
+      } catch (err) {
+        errorMsg.textContent = err.message || 'Enhancement failed.';
+        showSection(errorSection);
+      } finally {
+        clearInterval(enhElapsedTimer);
+        enhElapsedTimer = null;
+        enhancerLoading = false;
+        overlay.style.display = 'none';
+      }
+    }
+
+    /** Send to POST /rig (with or without enhanced GLB). */
+    async function _doRig(useEnhanced) {
       spinnerLabel.textContent = enhancedToggle.checked
         ? 'Rigging face (Enhanced Mode — up to 3 attempts)…'
         : 'Rigging face (Classic Mode — up to 3 attempts)…';
       card.classList.remove('wide');
-      _teardownAdjustRenderer();
+      _teardownEnhanceRenderer();
       showSection(spinnerSection);
 
       const formData = new FormData();
-      formData.append('temp_id',    tempId);
+      if (useEnhanced && enhancedTempId) {
+        formData.append('enhanced_glb', enhancedTempId);
+      } else {
+        formData.append('temp_id', tempId);
+      }
       formData.append('y_back',     yBack.toString());
       formData.append('y_front',    yFront.toString());
       formData.append('use_pou_rbf', enhancedToggle.checked ? 'true' : 'false');
@@ -1193,14 +1548,12 @@
         const rigId     = response.headers.get('X-Rig-Id');
 
         if (rigStatus === 'needs_human') {
-          // JSON response — auto-rig needs help.
           const data = await response.json();
           currentRigId = data.rig_id;
           _showHumanAssist(data);
           return;
         }
 
-        // ── done: GLB FileResponse ──────────────────────────────────
         currentRigId = rigId;
         spinnerLabel.textContent = 'Rig complete — downloading model…';
         await _handleRigSuccess(response, rigId);
@@ -1209,7 +1562,7 @@
         errorMsg.textContent = err.message || 'An unexpected error occurred.';
         showSection(errorSection);
       }
-    });
+    }
 
     /** Handle a successful rig response (FileResponse with GLB blob). */
     async function _handleRigSuccess(response, rigId) {
@@ -1791,6 +2144,259 @@
       planeMesh = backHandle = frontHandle = null;
       dragging = null;
     }
+
+    // ── Enhancer Review renderer ──────────────────────────────────────────
+
+    function _initEnhanceRenderer(modelUrl) {
+      _teardownEnhanceRenderer();
+
+      const wrap = document.getElementById('enhance-canvas-wrap');
+      const canvas = document.getElementById('enhance-canvas');
+      const W = wrap.clientWidth, H = wrap.clientHeight;
+
+      enhRenderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      enhRenderer.setSize(W, H, false);
+      enhRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      enhRenderer.setClearColor(0x0d0d0f);
+      enhRenderer.outputColorSpace = THREE.SRGBColorSpace;
+
+      enhScene = new THREE.Scene();
+      enhCamera = new THREE.PerspectiveCamera(40, W / H, 0.001, 1000);
+      enhCamera.position.set(0, 0, 2);
+
+      enhScene.add(new THREE.HemisphereLight(0xfff6e8, 0x1a1a2e, 0.75));
+      const kl = new THREE.DirectionalLight(0xfffaf0, 2.4);
+      kl.position.set(0, 1, 2);
+      enhScene.add(kl);
+      const rim = new THREE.DirectionalLight(0x8aacff, 0.55);
+      rim.position.set(-0.6, 1.2, -2);
+      enhScene.add(rim);
+
+      enhControls = new OrbitControls(enhCamera, enhRenderer.domElement);
+      enhControls.enableDamping = true;
+      enhControls.dampingFactor = 0.07;
+
+      // Load initial model
+      _loadEnhanceModel(modelUrl);
+
+      function loop() {
+        enhAnimId = requestAnimationFrame(loop);
+        if (enhControls) enhControls.update();
+        if (enhRenderer && enhScene && enhCamera) enhRenderer.render(enhScene, enhCamera);
+      }
+      loop();
+
+      new ResizeObserver(() => {
+        if (!enhRenderer) return;
+        const w = wrap.clientWidth, h = wrap.clientHeight;
+        enhRenderer.setSize(w, h, false);
+        enhCamera.aspect = w / h;
+        enhCamera.updateProjectionMatrix();
+      }).observe(wrap);
+    }
+
+    function _loadEnhanceModel(url) {
+      if (!enhScene) return;
+
+      // Remove old scene
+      if (enhLoadedScene) {
+        enhScene.remove(enhLoadedScene);
+        enhLoadedScene = null;
+      }
+      enhOriginalMaterials.clear();
+
+      const canvas = document.getElementById('enhance-canvas');
+      canvas.style.opacity = '0';
+
+      const loader = new GLTFLoader();
+      loader.load(url, gltf => {
+        enhLoadedScene = gltf.scene;
+        enhScene.add(gltf.scene);
+
+        const box = new THREE.Box3().setFromObject(gltf.scene);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+
+        enhCamera.position.set(center.x, center.y, center.z + maxDim * 1.8);
+        enhCamera.near = maxDim * 0.001;
+        enhCamera.far = maxDim * 100;
+        enhCamera.updateProjectionMatrix();
+        enhControls.target.copy(center);
+        enhControls.update();
+
+        // If density mode is on, apply it to the new model
+        if (enhDensityMode) _applyDensityHeatmap();
+
+        // Fade in
+        requestAnimationFrame(() => { canvas.style.opacity = '1'; });
+      }, undefined, err => {
+        console.error('GLTFLoader (enhance):', err);
+        canvas.style.opacity = '1';
+      });
+    }
+
+    function _teardownEnhanceRenderer() {
+      if (enhAnimId) cancelAnimationFrame(enhAnimId);
+      enhAnimId = null;
+      if (enhElapsedTimer) { clearInterval(enhElapsedTimer); enhElapsedTimer = null; }
+      if (enhRenderer) { enhRenderer.dispose(); enhRenderer = null; }
+      enhScene = enhCamera = enhControls = null;
+      enhLoadedScene = null;
+      enhOriginalMaterials.clear();
+      enhDensityMode = false;
+      enhDensityMaterial = null;
+      if (enhOriginalGlbUrl) { URL.revokeObjectURL(enhOriginalGlbUrl); enhOriginalGlbUrl = null; }
+    }
+
+    function _populateEnhanceStats(stats) {
+      document.getElementById('enh-stat-orig-verts').textContent =
+        stats.original_head_verts?.toLocaleString() ?? '—';
+      document.getElementById('enh-stat-enh-verts').textContent =
+        stats.enhanced_head_verts?.toLocaleString() ?? '—';
+      document.getElementById('enh-stat-eye-density').textContent =
+        stats.eye_region_density != null ? stats.eye_region_density.toFixed(1) + 'mm avg edge' : '—';
+      document.getElementById('enh-stat-mouth-density').textContent =
+        stats.mouth_region_density != null ? stats.mouth_region_density.toFixed(1) + 'mm avg edge' : '—';
+      document.getElementById('enh-stat-eyeball-verts').textContent =
+        stats.eyeball_verts_preserved != null ? stats.eyeball_verts_preserved + ' verts' : '—';
+      document.getElementById('enh-stat-time').textContent =
+        stats.remesh_duration_ms != null ? stats.remesh_duration_ms + 'ms' : '—';
+    }
+
+    // ── Before/After toggle ──────────────────────────────────────────────
+    document.getElementById('enh-show-original').addEventListener('click', () => {
+      if (enhShowingOriginal || !enhOriginalGlbUrl) return;
+      enhShowingOriginal = true;
+      document.getElementById('enh-show-original').classList.add('active');
+      document.getElementById('enh-show-enhanced').classList.remove('active');
+      _loadEnhanceModel(enhOriginalGlbUrl);
+    });
+
+    document.getElementById('enh-show-enhanced').addEventListener('click', () => {
+      if (!enhShowingOriginal || !enhancedGlbUrl) return;
+      enhShowingOriginal = false;
+      document.getElementById('enh-show-enhanced').classList.add('active');
+      document.getElementById('enh-show-original').classList.remove('active');
+      _loadEnhanceModel(enhancedGlbUrl);
+    });
+
+    // ── Density heatmap toggle ───────────────────────────────────────────
+    document.getElementById('enh-density-toggle').addEventListener('click', () => {
+      enhDensityMode = !enhDensityMode;
+      document.getElementById('enh-density-toggle').classList.toggle('active', enhDensityMode);
+      if (enhDensityMode) {
+        _applyDensityHeatmap();
+      } else {
+        _removeDensityHeatmap();
+      }
+    });
+
+    function _applyDensityHeatmap() {
+      if (!enhLoadedScene) return;
+
+      enhLoadedScene.traverse(obj => {
+        if (!obj.isMesh || !obj.geometry) return;
+
+        // Save original material
+        if (!enhOriginalMaterials.has(obj)) {
+          enhOriginalMaterials.set(obj, obj.material);
+        }
+
+        const geo = obj.geometry;
+        const posAttr = geo.attributes.position;
+        const index = geo.index;
+        if (!posAttr) return;
+
+        const vertCount = posAttr.count;
+
+        // Build adjacency: for each vertex, collect edge lengths
+        const edgeLengths = new Float32Array(vertCount).fill(0);
+        const edgeCounts = new Uint16Array(vertCount).fill(0);
+
+        const vA = new THREE.Vector3(), vB = new THREE.Vector3();
+
+        function addEdge(a, b) {
+          vA.fromBufferAttribute(posAttr, a);
+          vB.fromBufferAttribute(posAttr, b);
+          const len = vA.distanceTo(vB);
+          edgeLengths[a] += len; edgeCounts[a]++;
+          edgeLengths[b] += len; edgeCounts[b]++;
+        }
+
+        if (index) {
+          for (let i = 0; i < index.count; i += 3) {
+            const a = index.getX(i), b = index.getX(i+1), c = index.getX(i+2);
+            addEdge(a, b); addEdge(b, c); addEdge(a, c);
+          }
+        } else {
+          for (let i = 0; i < posAttr.count; i += 3) {
+            addEdge(i, i+1); addEdge(i+1, i+2); addEdge(i, i+2);
+          }
+        }
+
+        // Compute avg edge length per vertex and map to color
+        const colors = new Float32Array(vertCount * 3);
+        for (let i = 0; i < vertCount; i++) {
+          const avgLen = edgeCounts[i] > 0 ? edgeLengths[i] / edgeCounts[i] : 0;
+          const lenMM = avgLen * 1000;  // convert to mm
+
+          // Blue (>6mm) → Green (3-6mm) → Red (<3mm)
+          let r, g, b;
+          if (lenMM >= 6.0) {
+            // Blue: sparse
+            r = 0.15; g = 0.3; b = 0.9;
+          } else if (lenMM >= 3.0) {
+            // Green to blue gradient
+            const t = (lenMM - 3.0) / 3.0;  // 0 at 3mm, 1 at 6mm
+            r = 0.1 * (1 - t) + 0.15 * t;
+            g = 0.8 * (1 - t) + 0.3 * t;
+            b = 0.2 * (1 - t) + 0.9 * t;
+          } else {
+            // Red: dense
+            const t = Math.max(0, lenMM / 3.0);  // 0 at 0mm, 1 at 3mm
+            r = 0.95;
+            g = 0.15 + 0.65 * t;
+            b = 0.1 + 0.1 * t;
+          }
+          colors[i * 3] = r;
+          colors[i * 3 + 1] = g;
+          colors[i * 3 + 2] = b;
+        }
+
+        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        obj.material = new THREE.MeshStandardMaterial({
+          vertexColors: true,
+          roughness: 0.7,
+          metalness: 0.0,
+        });
+      });
+    }
+
+    function _removeDensityHeatmap() {
+      if (!enhLoadedScene) return;
+      enhLoadedScene.traverse(obj => {
+        if (!obj.isMesh) return;
+        const orig = enhOriginalMaterials.get(obj);
+        if (orig) obj.material = orig;
+      });
+    }
+
+    // ── Action buttons ───────────────────────────────────────────────────
+    document.getElementById('enh-approve-btn').addEventListener('click', () => {
+      _doRig(true);
+    });
+
+    document.getElementById('enh-rerun-btn').addEventListener('click', () => {
+      if (enhancerLoading) return;
+      _startEnhanceRequest();
+    });
+
+    document.getElementById('enh-skip-link').addEventListener('click', () => {
+      _teardownEnhanceRenderer();
+      _doRig(false);
+    });
 
     // ── Three.js renderer ────────────────────────────────────────────────
     function _initRenderer(glbUrl) {
