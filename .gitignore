@@ -4,3 +4,4 @@ __pycache__/
 assets/face_landmarker.task
 venv/
 venv/ # if not already there
+venv/ # if not already there
