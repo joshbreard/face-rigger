@@ -541,6 +541,120 @@
       text-align: right;
     }
 
+    /* ── Human-assist landmark section ──────────────────────────────────── */
+    #human-section {
+      display: none;
+      flex-direction: column;
+      gap: 14px;
+      width: 100%;
+    }
+    #human-section .human-header {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      text-align: center;
+    }
+    #human-section .human-icon {
+      width: 48px; height: 48px;
+      border-radius: 50%;
+      background: rgba(251, 146, 60, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #human-section .human-icon svg { stroke: #fb923c; }
+    #human-failures {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: center;
+    }
+    .failure-chip {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(239, 68, 68, 0.12);
+      color: #ef4444;
+    }
+    #human-canvas-wrap {
+      position: relative;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0d0d0f;
+      height: 400px;
+    }
+    #human-canvas {
+      width: 100%; height: 100%; display: block;
+      cursor: crosshair;
+    }
+    #human-canvas-loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 10px;
+      background: #0d0d0f;
+      font-size: 0.8rem;
+      color: #6b6b75;
+    }
+    #landmark-status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+    }
+    .lm-chip {
+      font-size: 0.78rem;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: #1e1e24;
+      border: 1px solid #2a2a35;
+      color: #6b6b75;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .lm-chip.active {
+      border-color: #6e6eff;
+      color: #a0a0ff;
+      background: rgba(110, 110, 255, 0.08);
+    }
+    .lm-chip.placed {
+      border-color: #22c55e;
+      color: #86efac;
+      background: rgba(34, 197, 94, 0.08);
+    }
+    .human-footer {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+    }
+    #submit-hints-btn {
+      background: #fb923c;
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.9rem;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 24px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #submit-hints-btn:hover { background: #f97316; }
+    #submit-hints-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #skip-hints-btn {
+      background: transparent;
+      border: 1px solid #333;
+      color: #888;
+      font-size: 0.82rem;
+      border-radius: 8px;
+      padding: 10px 16px;
+      cursor: pointer;
+    }
+
     /* ── Responsive collapse ───────────────────────────────────────────── */
     @media (max-width: 680px) {
       #preview-panel {
@@ -550,6 +664,7 @@
       #canvas-wrap { height: 260px; }
       #morph-panel { height: 280px; }
       #adjust-canvas-wrap { height: 300px; }
+      #human-canvas-wrap { height: 280px; }
     }
   </style>
 </head>
@@ -680,6 +795,40 @@
       </div>
     </div>
 
+    <!-- ── Human-assist landmark annotation ── -->
+    <div id="human-section">
+      <div class="human-header">
+        <div class="human-icon">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+        </div>
+        <p style="font-size:0.92rem;color:#fb923c;font-weight:600;">Auto-rig needs your help</p>
+        <p style="font-size:0.82rem;color:#9090a8;">
+          Click on the model to place key landmarks. Select a label below, then click on the face.
+        </p>
+        <div id="human-failures"></div>
+      </div>
+
+      <div id="landmark-status"></div>
+
+      <div id="human-canvas-wrap">
+        <canvas id="human-canvas"></canvas>
+        <div id="human-canvas-loading">
+          <div class="spinner" style="width:28px;height:28px;border-width:2px;"></div>
+          <span>Loading model…</span>
+        </div>
+      </div>
+
+      <div class="human-footer">
+        <button id="skip-hints-btn">Skip — use best attempt</button>
+        <button id="submit-hints-btn" disabled>Submit landmarks &amp; re-rig</button>
+      </div>
+    </div>
+
     <!-- ── Error ── -->
     <div id="error-section">
       <div class="error-icon">
@@ -709,6 +858,7 @@
     const spinnerLabel     = document.getElementById('spinner-label');
     const adjustSection    = document.getElementById('adjust-section');
     const successSection   = document.getElementById('success-section');
+    const humanSection     = document.getElementById('human-section');
     const errorSection     = document.getElementById('error-section');
     const downloadBtn      = document.getElementById('download-btn');
     const errorMsg         = document.getElementById('error-msg');
@@ -730,6 +880,12 @@
     const mvSection        = document.getElementById('mv-section');
     const mvViewer         = document.getElementById('mv-viewer');
     const mvSliders        = document.getElementById('mv-sliders');
+    const humanFailures    = document.getElementById('human-failures');
+    const landmarkStatus   = document.getElementById('landmark-status');
+    const humanCanvasEl    = document.getElementById('human-canvas');
+    const humanCanvasLoad  = document.getElementById('human-canvas-loading');
+    const submitHintsBtn   = document.getElementById('submit-hints-btn');
+    const skipHintsBtn     = document.getElementById('skip-hints-btn');
 
     // ── Enhanced Mode toggle ─────────────────────────────────────────────
     enhancedToggle.addEventListener('change', () => {
@@ -744,6 +900,7 @@
     let renderer, scene, camera, controls, animId, keyLight;
     let headMesh = null;
     let currentAnimId = null;
+    let currentRigId = null;
 
     // Adjust step
     let tempId = null;
@@ -754,9 +911,32 @@
     let planeXMin = -1, planeXMax = 1;
     let dragging = null;  // 'back' | 'front' | null
 
+    // Human-assist landmark annotation
+    let humRenderer = null, humScene = null, humCamera = null, humControls = null;
+    let humAnimId = null;
+    let humLoadedScene = null;
+    const LANDMARK_NAMES = ['nose_tip', 'left_eye_outer', 'right_eye_outer', 'mouth_left', 'mouth_right'];
+    const LANDMARK_LABELS = {
+      nose_tip: 'Nose tip',
+      left_eye_outer: 'Left eye (outer)',
+      right_eye_outer: 'Right eye (outer)',
+      mouth_left: 'Mouth left',
+      mouth_right: 'Mouth right',
+    };
+    const LANDMARK_COLORS = {
+      nose_tip: 0x22c55e,
+      left_eye_outer: 0x3b82f6,
+      right_eye_outer: 0x8b5cf6,
+      mouth_left: 0xf97316,
+      mouth_right: 0xec4899,
+    };
+    let activeLandmark = null;
+    let placedLandmarks = {};  // name -> {position: Vector3, marker: Mesh}
+    let humRaycaster = new THREE.Raycaster();
+
     // ── Section switcher ────────────────────────────────────────────────
     function showSection(section) {
-      [uploadSection, spinnerSection, adjustSection, successSection, errorSection].forEach(s => {
+      [uploadSection, spinnerSection, adjustSection, successSection, humanSection, errorSection].forEach(s => {
         s.style.display = 'none';
       });
       section.style.display = 'flex';
@@ -768,6 +948,7 @@
       card.classList.remove('wide');
       _teardownRenderer();
       _teardownAdjustRenderer();
+      _teardownHumanRenderer();
       morphList.innerHTML = '';
       valRows.innerHTML = '';
       validationPanel.style.display = 'none';
@@ -775,6 +956,7 @@
       mvViewer.src = '';
       mvSliders.innerHTML = '';
       tempId = null;
+      currentRigId = null;
       showSection(uploadSection);
     }
 
@@ -838,8 +1020,8 @@
     // ── "Rig It" → /rig ─────────────────────────────────────────────────
     rigItBtn.addEventListener('click', async () => {
       spinnerLabel.textContent = enhancedToggle.checked
-        ? 'Rigging face (Enhanced Mode)…'
-        : 'Rigging face (Classic Mode)…';
+        ? 'Rigging face (Enhanced Mode — up to 3 attempts)…'
+        : 'Rigging face (Classic Mode — up to 3 attempts)…';
       card.classList.remove('wide');
       _teardownAdjustRenderer();
       showSection(spinnerSection);
@@ -858,39 +1040,283 @@
           throw new Error(detail);
         }
 
-        // ── Headers are available immediately — read rig metadata ────
-        const rigId    = response.headers.get('X-Rig-Id');
         const rigStatus = response.headers.get('X-Rig-Status');
-        const rigScore = response.headers.get('X-Rig-Score');
+        const rigId     = response.headers.get('X-Rig-Id');
 
-        // Transition UI as soon as we know the rig is done (headers arrived).
-        if (rigStatus === 'done') {
-          spinnerLabel.textContent = 'Rig complete — downloading model…';
+        if (rigStatus === 'needs_human') {
+          // JSON response — auto-rig needs help.
+          const data = await response.json();
+          currentRigId = data.rig_id;
+          _showHumanAssist(data);
+          return;
         }
 
-        // Start polling as a fallback in case headers were delayed.
-        let pollTimer = null;
-        if (rigId && rigStatus !== 'done') {
-          pollTimer = setInterval(async () => {
-            try {
-              const st = await fetch(`/rig-status/${rigId}`);
-              if (!st.ok) return;
-              const stData = await st.json();
-              if (stData.status === 'done') {
-                clearInterval(pollTimer);
-                pollTimer = null;
-                spinnerLabel.textContent = 'Rig complete — downloading model…';
-              }
-            } catch (_) {}
-          }, 1000);
+        // ── done: GLB FileResponse ──────────────────────────────────
+        currentRigId = rigId;
+        spinnerLabel.textContent = 'Rig complete — downloading model…';
+        await _handleRigSuccess(response, rigId);
+
+      } catch (err) {
+        errorMsg.textContent = err.message || 'An unexpected error occurred.';
+        showSection(errorSection);
+      }
+    });
+
+    /** Handle a successful rig response (FileResponse with GLB blob). */
+    async function _handleRigSuccess(response, rigId) {
+      const blob   = await response.blob();
+      const glbUrl = URL.createObjectURL(blob);
+      currentRigId = rigId;
+
+      downloadBtn.href = glbUrl;
+      card.classList.add('wide');
+      showSection(successSection);
+      canvasLoading.style.display = 'flex';
+      _initRenderer(glbUrl);
+      _initModelViewer(glbUrl);
+
+      if (rigId) _fetchValidation(rigId);
+    }
+
+    // ── Human-assist mode ────────────────────────────────────────────────
+    function _showHumanAssist(data) {
+      // Show critical failures as chips.
+      humanFailures.innerHTML = '';
+      const failures = data.critical_failures || data.failing_blendshapes || [];
+      for (const name of failures.slice(0, 8)) {
+        const chip = document.createElement('span');
+        chip.className = 'failure-chip';
+        chip.textContent = name;
+        humanFailures.appendChild(chip);
+      }
+
+      // Build landmark chips.
+      landmarkStatus.innerHTML = '';
+      placedLandmarks = {};
+      activeLandmark = null;
+      for (const name of LANDMARK_NAMES) {
+        const chip = document.createElement('span');
+        chip.className = 'lm-chip';
+        chip.textContent = LANDMARK_LABELS[name];
+        chip.dataset.name = name;
+        chip.addEventListener('click', () => {
+          activeLandmark = name;
+          landmarkStatus.querySelectorAll('.lm-chip').forEach(c => c.classList.remove('active'));
+          chip.classList.add('active');
+        });
+        landmarkStatus.appendChild(chip);
+      }
+      // Auto-select first.
+      activeLandmark = LANDMARK_NAMES[0];
+      landmarkStatus.querySelector('.lm-chip').classList.add('active');
+
+      submitHintsBtn.disabled = true;
+      card.classList.add('wide');
+      showSection(humanSection);
+      humanCanvasLoad.style.display = 'flex';
+      _initHumanRenderer();
+    }
+
+    function _initHumanRenderer() {
+      _teardownHumanRenderer();
+
+      const wrap = document.getElementById('human-canvas-wrap');
+      const W = wrap.clientWidth, H = wrap.clientHeight;
+
+      humRenderer = new THREE.WebGLRenderer({ canvas: humanCanvasEl, antialias: true });
+      humRenderer.setSize(W, H, false);
+      humRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      humRenderer.setClearColor(0x0d0d0f);
+      humRenderer.outputColorSpace = THREE.SRGBColorSpace;
+
+      humScene = new THREE.Scene();
+      humCamera = new THREE.PerspectiveCamera(40, W / H, 0.001, 1000);
+      humCamera.position.set(0, 0, 2);
+
+      humScene.add(new THREE.HemisphereLight(0xfff6e8, 0x1a1a2e, 0.75));
+      const kl = new THREE.DirectionalLight(0xfffaf0, 2.4);
+      kl.position.set(0, 1, 2);
+      humScene.add(kl);
+
+      humControls = new OrbitControls(humCamera, humRenderer.domElement);
+      humControls.enableDamping = true;
+      humControls.dampingFactor = 0.07;
+
+      // Load the original GLB for landmark annotation.
+      fetch(`/rig-preview/${currentRigId}`)
+        .then(resp => {
+          if (!resp.ok) throw new Error('Failed to load preview');
+          return resp.blob();
+        })
+        .then(blob => {
+          const url = URL.createObjectURL(blob);
+          const loader2 = new GLTFLoader();
+          loader2.load(url, gltf => {
+            humLoadedScene = gltf.scene;
+            humScene.add(gltf.scene);
+
+            const box = new THREE.Box3().setFromObject(gltf.scene);
+            const size = box.getSize(new THREE.Vector3());
+            const center = box.getCenter(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+
+            humCamera.position.set(center.x, center.y, center.z + maxDim * 1.8);
+            humCamera.near = maxDim * 0.001;
+            humCamera.far = maxDim * 100;
+            humCamera.updateProjectionMatrix();
+            humControls.target.copy(center);
+            humControls.update();
+
+            humanCanvasLoad.style.display = 'none';
+            URL.revokeObjectURL(url);
+          });
+        })
+        .catch(() => {
+          humanCanvasLoad.style.display = 'none';
+        });
+
+      function loop() {
+        humAnimId = requestAnimationFrame(loop);
+        humControls.update();
+        humRenderer.render(humScene, humCamera);
+      }
+      loop();
+
+      humanCanvasEl.addEventListener('click', _onHumanClick);
+
+      new ResizeObserver(() => {
+        if (!humRenderer) return;
+        const w = wrap.clientWidth, h = wrap.clientHeight;
+        humRenderer.setSize(w, h, false);
+        humCamera.aspect = w / h;
+        humCamera.updateProjectionMatrix();
+      }).observe(wrap);
+    }
+
+    function _onHumanClick(e) {
+      if (!activeLandmark || !humLoadedScene) return;
+
+      const rect = humanCanvasEl.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        ((e.clientY - rect.top) / rect.height) * -2 + 1,
+      );
+      humRaycaster.setFromCamera(ndc, humCamera);
+      const hits = humRaycaster.intersectObject(humLoadedScene, true);
+      if (hits.length === 0) return;
+
+      const point = hits[0].point.clone();
+
+      // Remove old marker if exists.
+      if (placedLandmarks[activeLandmark]) {
+        humScene.remove(placedLandmarks[activeLandmark].marker);
+      }
+
+      // Place a sphere marker.
+      const color = LANDMARK_COLORS[activeLandmark] || 0xffffff;
+      const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.003, 12, 12),
+        new THREE.MeshBasicMaterial({ color, depthTest: false }),
+      );
+      marker.renderOrder = 999;
+      marker.position.copy(point);
+      humScene.add(marker);
+
+      placedLandmarks[activeLandmark] = { position: point, marker };
+
+      // Update chip state.
+      const chip = landmarkStatus.querySelector(`[data-name="${activeLandmark}"]`);
+      if (chip) {
+        chip.classList.remove('active');
+        chip.classList.add('placed');
+      }
+
+      // Auto-advance to next unplaced landmark.
+      const nextUnplaced = LANDMARK_NAMES.find(n => !placedLandmarks[n]);
+      if (nextUnplaced) {
+        activeLandmark = nextUnplaced;
+        const nextChip = landmarkStatus.querySelector(`[data-name="${nextUnplaced}"]`);
+        if (nextChip) nextChip.classList.add('active');
+      } else {
+        activeLandmark = null;
+      }
+
+      // Enable submit once at least 3 landmarks are placed.
+      const placedCount = Object.keys(placedLandmarks).length;
+      submitHintsBtn.disabled = placedCount < 3;
+    }
+
+    function _teardownHumanRenderer() {
+      if (humAnimId) cancelAnimationFrame(humAnimId);
+      humAnimId = null;
+      humanCanvasEl.removeEventListener('click', _onHumanClick);
+      if (humRenderer) { humRenderer.dispose(); humRenderer = null; }
+      humScene = humCamera = humControls = null;
+      humLoadedScene = null;
+      placedLandmarks = {};
+      activeLandmark = null;
+    }
+
+    // ── Submit hints & retry ───────────────────────────────────────────
+    submitHintsBtn.addEventListener('click', async () => {
+      if (!currentRigId) return;
+      const hints = {};
+      for (const [name, data] of Object.entries(placedLandmarks)) {
+        hints[name] = [data.position.x, data.position.y, data.position.z];
+      }
+
+      spinnerLabel.textContent = 'Refining with your hints…';
+      card.classList.remove('wide');
+      _teardownHumanRenderer();
+      showSection(spinnerSection);
+
+      try {
+        // Save hints.
+        await fetch(`/rig-hints/${currentRigId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hints),
+        });
+
+        // Retry rig.
+        const response = await fetch(`/rig-retry/${currentRigId}`, { method: 'POST' });
+        if (!response.ok) {
+          let detail = `Server error ${response.status}`;
+          try { const j = await response.json(); detail = j.detail || detail; } catch (_) {}
+          throw new Error(detail);
         }
 
-        // ── Download body in parallel — UI already updated above ─────
-        const blob   = await response.blob();
+        const rigStatus = response.headers.get('X-Rig-Status');
+        const rigId = response.headers.get('X-Rig-Id') || currentRigId;
+
+        if (rigStatus === 'needs_human') {
+          const data = await response.json();
+          currentRigId = data.rig_id;
+          _showHumanAssist(data);
+        } else {
+          await _handleRigSuccess(response, rigId);
+        }
+
+      } catch (err) {
+        errorMsg.textContent = err.message || 'Retry failed.';
+        showSection(errorSection);
+      }
+    });
+
+    // Skip hints — use best attempt as-is.
+    skipHintsBtn.addEventListener('click', async () => {
+      if (!currentRigId) { resetToUpload(); return; }
+
+      spinnerLabel.textContent = 'Loading best attempt…';
+      card.classList.remove('wide');
+      _teardownHumanRenderer();
+      showSection(spinnerSection);
+
+      try {
+        const resp = await fetch(`/rig-preview/${currentRigId}?variant=rigged`);
+        if (!resp.ok) throw new Error('Failed to load rig result.');
+        const blob = await resp.blob();
         const glbUrl = URL.createObjectURL(blob);
-
-        // Stop polling if still running.
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 
         downloadBtn.href = glbUrl;
         card.classList.add('wide');
@@ -898,14 +1324,9 @@
         canvasLoading.style.display = 'flex';
         _initRenderer(glbUrl);
         _initModelViewer(glbUrl);
-
-        // Fetch validation results
-        if (rigId) {
-          _fetchValidation(rigId);
-        }
-
+        _fetchValidation(currentRigId);
       } catch (err) {
-        errorMsg.textContent = err.message || 'An unexpected error occurred.';
+        errorMsg.textContent = err.message || 'Failed to load result.';
         showSection(errorSection);
       }
     });
@@ -922,9 +1343,10 @@
 
     function _buildValidationPanel(data) {
       valRows.innerHTML = '';
+      const bs = data.blendshapes || data;  // support both nested and flat formats
       const order = ['jawOpen', 'eyeBlinkLeft', 'eyeBlinkRight', 'mouthSmileLeft', 'mouthSmileRight'];
       for (const name of order) {
-        const info = data[name];
+        const info = bs[name];
         if (!info) continue;
         const cls = info.pass ? 'pass' : 'fail';
         const row = document.createElement('div');
