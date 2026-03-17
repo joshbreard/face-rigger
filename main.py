@@ -27,7 +27,7 @@ from rigger.aligner import align_icp
 from rigger.controller import rig_with_retries, SCORE_OK, MAX_ATTEMPTS
 from rigger.enhancer import EnhancerLandmarkError, MeshEnhancer
 from rigger.glb_writer import patch_glb_add_morph_targets
-from rigger.landmarks import detect_landmarks
+from rigger.landmarks import detect_landmarks_from_vertices
 from rigger.mouth_slit import cut_mouth_slit
 from rigger.separator import _find_jaw_cutoff_geometric, separate_head_body
 from rigger.transfer import (

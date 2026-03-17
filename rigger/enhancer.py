@@ -6,7 +6,7 @@ separator/RBF pipeline. Produces a remeshed head with:
   - Moderate density on the rest of the face (6 mm target)
   - Eyeball geometry preserved exactly (no remesh)
   - Pre-cut mouth slit on clean topology
-  - Approximate UV transfer via nearest-vertex projection
+  - UV transfer via barycentric interpolation (seam-safe)
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ _DENSE_REGION_RADIUS_M = 0.015         # 15 mm from eye/mouth/brow landmarks
 _TARGET_EDGE_DENSE_M = 0.003           # 3 mm
 _TARGET_EDGE_STANDARD_M = 0.006        # 6 mm
 _REMESH_ITERATIONS = 5
+_BOUNDARY_SNAP_TOL_M = 0.005           # 5 mm — vertices within this of neck_cutoff_y are snapped
 
 
 def _decode_gltf_accessor(
@@ -122,8 +123,6 @@ class MeshEnhancer:
 
         # ── Step 2: Detect face landmarks on head mesh ────────────────────────
         # Use 3D vertex geometry directly — no render needed.
-        # pyrender is incompatible with background threads on macOS (NSWindow
-        # must be instantiated on the main thread).
         t2 = time.perf_counter()
         lm_result = detect_landmarks_from_vertices(head_mesh)
         if lm_result is None:
@@ -197,17 +196,50 @@ class MeshEnhancer:
             time.perf_counter() - t5,
         )
 
-        # ── Step 6: UV texture projection ─────────────────────────────────────
-        t6 = time.perf_counter()
-        self._project_uvs(original_head, enhanced_head)
-        log.info("Step 6: UV projection complete (%.1fs)", time.perf_counter() - t6)
+        # ── Step 5b: Snap neck boundary verts to original positions ──────────
+        # After remeshing + mouth slit, boundary verts near the neck cut
+        # plane may have shifted.  Snap them back to their pre-remesh
+        # positions so the seam matches the body mesh exactly.
+        t5b = time.perf_counter()
+        enhanced_verts = np.asarray(enhanced_head.vertices, dtype=np.float64)
+        original_verts = np.asarray(original_head.vertices, dtype=np.float64)
 
-        # ── Step 7: Reconstruct GLB ───────────────────────────────────────────
-        t7 = time.perf_counter()
+        orig_boundary_mask = (
+            np.abs(original_verts[:, 1] - neck_cutoff_y) < _BOUNDARY_SNAP_TOL_M
+        )
+        enh_boundary_mask = (
+            np.abs(enhanced_verts[:, 1] - neck_cutoff_y) < _BOUNDARY_SNAP_TOL_M
+        )
+
+        n_snapped = 0
+        if enh_boundary_mask.any() and orig_boundary_mask.any():
+            orig_boundary_pts = original_verts[orig_boundary_mask]
+            tree = KDTree(orig_boundary_pts)
+            enh_boundary_idx = np.where(enh_boundary_mask)[0]
+            _, nearest = tree.query(enhanced_verts[enh_boundary_idx])
+            enhanced_verts[enh_boundary_idx] = orig_boundary_pts[nearest]
+            enhanced_head.vertices = enhanced_verts
+            n_snapped = len(enh_boundary_idx)
+
+        log.info(
+            "Step 5b: snapped %d neck boundary verts (tol=%.1fmm, %.1fs)",
+            n_snapped, _BOUNDARY_SNAP_TOL_M * 1000,
+            time.perf_counter() - t5b,
+        )
+
+        # ── Step 6: Reconstruct GLB ───────────────────────────────────────────
+        t6 = time.perf_counter()
         output_path = self._reconstruct_glb(
             glb_p, enhanced_head, body_mesh, scene_meta,
         )
-        log.info("Step 7: GLB reconstructed at %s (%.1fs)", output_path, time.perf_counter() - t7)
+        out_glb_path = str(output_path)
+        log.info("Step 6: GLB reconstructed at %s (%.1fs)", output_path, time.perf_counter() - t6)
+
+        # ── Step 7: UV texture projection ─────────────────────────────────────
+        t7 = time.perf_counter()
+        enhanced_verts_np = np.asarray(enhanced_head.vertices, dtype=np.float32)
+        self._project_uvs(out_glb_path, str(glb_p), enhanced_verts_np)
+        log.info("Step 7: UV projection complete (%.1fs)", time.perf_counter() - t7)
 
         total_s = time.perf_counter() - t_total
         log.info("Stage 0 total: %.1fs", total_s)
@@ -423,15 +455,27 @@ class MeshEnhancer:
             process=False,
         )
 
-        # Transfer UVs from the original head mesh via nearest-vertex lookup.
+        # Transfer UVs from the original head mesh via barycentric interpolation.
         # Remeshing destroys UV coordinates, so we recover them here.
+        # Using closest-point + barycentric weights avoids seam tears that
+        # nearest-neighbor (KDTree) causes when remeshed vertices near UV seams
+        # get matched to source vertices on the wrong side.
         orig_vis = head_mesh.visual
         if hasattr(orig_vis, "uv") and orig_vis.uv is not None:
             orig_uv = np.asarray(orig_vis.uv, dtype=np.float32)
             if len(orig_uv) == len(verts):
-                tree = KDTree(verts)
-                _, nearest_idx = tree.query(merged_verts)
-                new_uv = orig_uv[nearest_idx]
+                from trimesh.proximity import closest_point as _closest_point
+                closest_pts, _dists, tri_ids = _closest_point(head_mesh, merged_verts)
+                src_faces_arr = np.asarray(head_mesh.faces)
+                bary = trimesh.triangles.points_to_barycentric(
+                    head_mesh.triangles[tri_ids], closest_pts,
+                )
+                v0 = src_faces_arr[tri_ids, 0]
+                v1 = src_faces_arr[tri_ids, 1]
+                v2 = src_faces_arr[tri_ids, 2]
+                new_uv = (bary[:, 0:1] * orig_uv[v0] +
+                          bary[:, 1:2] * orig_uv[v1] +
+                          bary[:, 2:3] * orig_uv[v2])
                 enhanced.visual = trimesh.visual.TextureVisuals(
                     uv=new_uv,
                     material=orig_vis.material if hasattr(orig_vis, "material") else None,
@@ -453,30 +497,118 @@ class MeshEnhancer:
         }
         return enhanced, stats
 
-    @staticmethod
-    def _project_uvs(
-        original_mesh: trimesh.Trimesh,
-        enhanced_mesh: trimesh.Trimesh,
-    ) -> None:
-        """Project UVs from original mesh onto enhanced mesh via nearest-vertex lookup."""
-        orig_vis = original_mesh.visual
-        if not hasattr(orig_vis, "uv") or orig_vis.uv is None:
-            log.info("_project_uvs: original mesh has no UVs; skipping")
+    def _project_uvs(self, out_gltf_path, source_glb_path, enhanced_vertices):
+        import pygltflib, copy, struct
+        import numpy as np
+
+        # --- 1. Read source UVs and vertices via pygltflib ---
+        src = pygltflib.GLTF2.load(source_glb_path)
+        src_blob = src.binary_blob()
+
+        def decode_accessor(gltf, blob, accessor_idx):
+            acc = gltf.accessors[accessor_idx]
+            bv  = gltf.bufferViews[acc.bufferView]
+            dtype_map = {5120:'int8',5121:'uint8',5122:'int16',
+                         5123:'uint16',5125:'uint32',5126:'float32'}
+            comp_map  = {'SCALAR':1,'VEC2':2,'VEC3':3,'VEC4':4,'MAT4':16}
+            dtype = np.dtype(dtype_map[acc.componentType])
+            n_comp = comp_map[acc.type]
+            offset = bv.byteOffset + (acc.byteOffset or 0)
+            raw = blob[offset : offset + acc.count * n_comp * dtype.itemsize]
+            arr = np.frombuffer(raw, dtype=dtype).reshape(acc.count, n_comp)
+            return arr.astype(np.float32) if dtype != np.float32 else arr
+
+        # Find first primitive with TEXCOORD_0
+        src_prim = None
+        for mesh in src.meshes:
+            for prim in mesh.primitives:
+                if prim.attributes.TEXCOORD_0 is not None:
+                    src_prim = prim
+                    break
+            if src_prim: break
+
+        if src_prim is None:
+            log.warning("_project_uvs: source has no TEXCOORD_0, skipping")
             return
 
-        orig_uv = np.asarray(orig_vis.uv, dtype=np.float32)
-        orig_verts = np.asarray(original_mesh.vertices, dtype=np.float64)
+        src_verts = decode_accessor(src, src_blob, src_prim.attributes.POSITION)
+        src_uvs   = decode_accessor(src, src_blob, src_prim.attributes.TEXCOORD_0)
 
-        tree = KDTree(orig_verts)
-        new_verts = np.asarray(enhanced_mesh.vertices, dtype=np.float64)
-        _, nearest_idx = tree.query(new_verts)
+        # Decode face indices from the source primitive
+        if src_prim.indices is None:
+            log.warning("_project_uvs: source primitive has no indices, skipping")
+            return
+        src_faces = _decode_gltf_accessor(
+            src, src_prim.indices, src_blob,
+        ).reshape(-1, 3).astype(np.int32)
 
-        new_uv = orig_uv[nearest_idx]
-
-        enhanced_mesh.visual = trimesh.visual.TextureVisuals(
-            uv=new_uv,
-            material=orig_vis.material if hasattr(orig_vis, "material") else None,
+        # --- 2. Barycentric UV transfer via closest-point on triangles ---
+        # This avoids seam tears that nearest-neighbor (KDTree) causes when
+        # remeshed vertices near UV seams get matched to source vertices on
+        # the wrong side of the seam.
+        from trimesh.proximity import closest_point as _closest_point
+        src_trimesh = trimesh.Trimesh(
+            vertices=src_verts, faces=src_faces, process=False,
         )
+        closest_pts, _dists, tri_ids = _closest_point(
+            src_trimesh, enhanced_vertices,
+        )
+        bary = trimesh.triangles.points_to_barycentric(
+            src_trimesh.triangles[tri_ids], closest_pts,
+        )
+        v0 = src_faces[tri_ids, 0]
+        v1 = src_faces[tri_ids, 1]
+        v2 = src_faces[tri_ids, 2]
+        transferred_uvs = (bary[:, 0:1] * src_uvs[v0] +
+                           bary[:, 1:2] * src_uvs[v1] +
+                           bary[:, 2:3] * src_uvs[v2]).astype(np.float32)
+
+        # --- 3. Write UVs + copy material into out_gltf ---
+        out = pygltflib.GLTF2.load(out_gltf_path)
+        out_blob = bytearray(out.binary_blob() or b"")
+
+        def append_accessor(gltf, blob, arr, type_str, component_type=5126):
+            pad = (4 - len(blob) % 4) % 4
+            blob += b"\x00" * pad
+            raw = arr.astype(np.float32).tobytes()
+            bv = pygltflib.BufferView(
+                buffer=0, byteOffset=len(blob),
+                byteLength=len(raw), target=34962)
+            gltf.bufferViews.append(bv)
+            acc = pygltflib.Accessor(
+                bufferView=len(gltf.bufferViews)-1,
+                byteOffset=0, componentType=component_type,
+                count=len(arr), type=type_str)
+            gltf.accessors.append(acc)
+            blob += raw
+            return len(gltf.accessors)-1, blob
+
+        uv_acc_idx, out_blob = append_accessor(out, out_blob, transferred_uvs, "VEC2")
+        out.meshes[0].primitives[0].attributes.TEXCOORD_0 = uv_acc_idx
+
+        # --- 4. Copy materials + images from source ---
+        out.materials = copy.deepcopy(src.materials)
+        out.textures  = copy.deepcopy(src.textures)
+        out.images    = copy.deepcopy(src.images)
+        out.samplers  = copy.deepcopy(src.samplers)
+
+        for img in out.images:
+            if img.bufferView is not None:
+                sbv = src.bufferViews[img.bufferView]
+                chunk = src_blob[sbv.byteOffset : sbv.byteOffset + sbv.byteLength]
+                pad = (4 - len(out_blob) % 4) % 4
+                out_blob += b"\x00" * pad
+                new_bv = copy.deepcopy(sbv)
+                new_bv.byteOffset = len(out_blob)
+                new_bv.buffer = 0
+                out.bufferViews.append(new_bv)
+                img.bufferView = len(out.bufferViews) - 1
+                out_blob += chunk
+
+        out.meshes[0].primitives[0].material = 0
+        out.buffers[0].byteLength = len(out_blob)
+        out.set_binary_blob(bytes(out_blob))
+        out.save(out_gltf_path)
 
     @staticmethod
     def _reconstruct_glb(

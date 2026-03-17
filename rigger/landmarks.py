@@ -1,12 +1,14 @@
-"""Mediapipe facial landmark detection and face region masking.
+"""Face landmark estimation from 3D vertex geometry and region masking.
 
 Accepts an ICP-aligned trimesh.Trimesh head mesh (metres, Y-up, centred at origin).
 Returns landmark 3-D positions, named keypoints, and a per-vertex region mask (0-9).
 
+Uses purely geometric heuristics (front-face percentile, anatomical proportions)
+so it works from any thread — no GPU, no pyrender, no OpenGL context required.
+
 Returns None on any failure so callers fall back to classical methods.
 """
 import logging
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -14,8 +16,6 @@ import trimesh
 from scipy.spatial import KDTree
 
 log = logging.getLogger(__name__)
-
-MODEL_PATH = Path("assets/face_landmarker.task")
 
 # ── Named keypoints (MediaPipe 478-landmark mesh indices) ─────────────────────
 KEYPOINT_INDICES: dict[str, int] = {
@@ -73,70 +73,29 @@ def detect_landmarks(
     mesh: trimesh.Trimesh,
     image_size: int = 512,
 ) -> Optional[dict]:
-    """Detect MediaPipe face landmarks on *mesh* and compute a region mask.
+    """Estimate face landmarks from 3D vertex geometry and compute a region mask.
+
+    This is a thin wrapper around :func:`detect_landmarks_from_vertices` kept
+    for backward compatibility.  The *image_size* parameter is accepted but
+    ignored — no rendering is performed.
 
     Parameters
     ----------
     mesh : trimesh.Trimesh
         ICP-aligned head mesh (metres, Y-up, centred at origin).
     image_size : int
-        Frontal render resolution.
+        Ignored (kept for API compatibility).
 
     Returns
     -------
     dict with keys
-        'landmark_3d'           : dict[int, ndarray(3,)]  pixel→nearest vert pos
+        'landmark_3d'           : dict[int, ndarray(3,)]  estimated 3D positions
         'keypoints_3d'          : dict[str, ndarray(3,)]  named keypoints
         'keypoint_vert_indices' : dict[str, int]           vertex indices
         'face_region_mask'      : ndarray(N,) int  labels 0-9
     or None if detection fails.
     """
-    pixels = _render_and_detect(mesh, image_size)
-    if pixels is None:
-        return None
-
-    verts = np.asarray(mesh.vertices, dtype=np.float64)
-    x_arr, y_arr = verts[:, 0], verts[:, 1]
-
-    x_min_raw = float(x_arr.min()); x_range_raw = float(x_arr.max() - x_min_raw)
-    y_min_raw = float(y_arr.min()); y_range_raw = float(y_arr.max() - y_min_raw)
-    PAD = 0.05
-    x_min = x_min_raw - x_range_raw * PAD
-    x_range = x_range_raw * (1.0 + 2.0 * PAD)
-    y_min = y_min_raw - y_range_raw * PAD
-    y_range = y_range_raw * (1.0 + 2.0 * PAD)
-
-    xy_tree = KDTree(verts[:, :2])
-
-    def _pix_to_vert(px: float, py_pix: float) -> int:
-        wx = px / (image_size - 1) * x_range + x_min
-        wy = (1.0 - py_pix / (image_size - 1)) * y_range + y_min
-        _, vi = xy_tree.query([wx, wy])
-        return int(vi)
-
-    landmark_3d: dict[int, np.ndarray] = {}
-    for lm_idx in range(len(pixels)):
-        vi = _pix_to_vert(*pixels[lm_idx])
-        landmark_3d[lm_idx] = verts[vi].copy()
-
-    keypoints_3d: dict[str, np.ndarray] = {}
-    keypoint_vert_indices: dict[str, int] = {}
-    for name, lm_idx in KEYPOINT_INDICES.items():
-        vi = _pix_to_vert(*pixels[lm_idx])
-        keypoints_3d[name] = verts[vi].copy()
-        keypoint_vert_indices[name] = vi
-
-    face_region_mask = _compute_region_mask(verts, landmark_3d)
-
-    counts = {r: int((face_region_mask == i).sum()) for i, r in enumerate(REGION_NAMES)}
-    log.info("Landmarks: %d detected, 5 keypoints. Region counts: %s", len(landmark_3d), counts)
-
-    return {
-        "landmark_3d": landmark_3d,
-        "keypoints_3d": keypoints_3d,
-        "keypoint_vert_indices": keypoint_vert_indices,
-        "face_region_mask": face_region_mask,
-    }
+    return detect_landmarks_from_vertices(mesh)
 
 
 def detect_landmarks_from_vertices(
@@ -345,7 +304,7 @@ def detect_landmarks_from_vertices(
 
     counts = {r: int((face_region_mask == i).sum()) for i, r in enumerate(REGION_NAMES)}
     log.info(
-        "Landmarks (3D vertex fallback): 5 keypoints estimated from geometry. Region counts: %s",
+        "Landmarks (3D geometry): 5 keypoints estimated. Region counts: %s",
         counts,
     )
 
@@ -355,334 +314,6 @@ def detect_landmarks_from_vertices(
         "keypoint_vert_indices": keypoint_vert_indices,
         "face_region_mask": face_region_mask,
     }
-
-
-# ---------------------------------------------------------------------------
-# Internal: software rasterizer + MediaPipe runner
-# ---------------------------------------------------------------------------
-
-def _render_pyrender(
-    mesh: trimesh.Trimesh,
-    image_size: int,
-) -> Optional[np.ndarray]:
-    """Render *mesh* with pyrender using directional lighting.
-
-    Returns an (H, W, 3) uint8 RGB image, or None if pyrender is unavailable.
-    """
-    try:
-        import pyrender
-    except ImportError:
-        log.info("pyrender not installed; skipping lit render.")
-        return None
-
-    # Ensure minimum 512x512
-    image_size = max(image_size, 512)
-
-    verts = np.asarray(mesh.vertices, dtype=np.float64)
-    if len(verts) < 3:
-        return None
-
-    # Build pyrender mesh with material
-    # Try to use the GLB's original texture/material
-    material = None
-    has_texture = (
-        hasattr(mesh.visual, "material")
-        and mesh.visual.material is not None
-    )
-    if has_texture:
-        try:
-            vis = mesh.visual
-            if hasattr(vis, "to_color"):
-                color_vis = vis.to_color()
-                vertex_colors = np.asarray(color_vis.vertex_colors, dtype=np.uint8)
-                pr_mesh = pyrender.Mesh.from_trimesh(
-                    mesh, smooth=True,
-                )
-            else:
-                pr_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
-        except Exception:
-            has_texture = False
-
-    if not has_texture:
-        # Flat skin-tone fallback (#D4956A)
-        material = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=[0.831, 0.584, 0.416, 1.0],
-            metallicFactor=0.0,
-            roughnessFactor=0.8,
-        )
-        pr_mesh = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=True)
-
-    scene = pyrender.Scene(
-        bg_color=[0.0, 0.0, 0.0, 0.0],
-        ambient_light=[0.15, 0.15, 0.15],
-    )
-    scene.add(pr_mesh)
-
-    # Camera: positioned in front of face center, pointing at nose_tip
-    centroid = verts.mean(axis=0)
-    z_max = float(verts[:, 2].max())
-    nose_estimate = np.array([centroid[0], centroid[1], z_max])
-
-    # Place camera in front of the face along +Z
-    y_range = float(verts[:, 1].max() - verts[:, 1].min())
-    cam_distance = max(y_range * 2.0, 0.3)  # ensure face fills frame
-    cam_pos = np.array([nose_estimate[0], nose_estimate[1], nose_estimate[2] + cam_distance])
-
-    # Build camera-to-world matrix (looking at nose_estimate from cam_pos)
-    forward = nose_estimate - cam_pos
-    forward = forward / (np.linalg.norm(forward) + 1e-12)
-    world_up = np.array([0.0, 1.0, 0.0])
-    right = np.cross(forward, world_up)
-    right_norm = np.linalg.norm(right)
-    if right_norm < 1e-9:
-        world_up = np.array([0.0, 0.0, 1.0])
-        right = np.cross(forward, world_up)
-        right_norm = np.linalg.norm(right)
-    right = right / right_norm
-    up = np.cross(right, forward)
-
-    cam_pose = np.eye(4)
-    cam_pose[:3, 0] = right
-    cam_pose[:3, 1] = up
-    cam_pose[:3, 2] = -forward  # OpenGL convention: camera looks along -Z
-    cam_pose[:3, 3] = cam_pos
-
-    # Perspective camera
-    fov = 2.0 * np.arctan(y_range * 0.7 / cam_distance)
-    fov = np.clip(fov, 0.2, 1.2)  # reasonable range
-    camera = pyrender.PerspectiveCamera(yfov=fov, aspectRatio=1.0)
-    scene.add(camera, pose=cam_pose)
-
-    # Key light: directional from slightly above (ring light effect)
-    key_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=4.0)
-    key_light_pose = np.eye(4)
-    # Light aimed at face from slightly above and in front
-    key_dir = np.array([0.0, -0.3, -1.0])
-    key_dir = key_dir / np.linalg.norm(key_dir)
-    key_right = np.cross(key_dir, world_up)
-    key_right_norm = np.linalg.norm(key_right)
-    if key_right_norm > 1e-9:
-        key_right = key_right / key_right_norm
-    else:
-        key_right = np.array([1.0, 0.0, 0.0])
-    key_up = np.cross(key_right, key_dir)
-    key_light_pose[:3, 0] = key_right
-    key_light_pose[:3, 1] = key_up
-    key_light_pose[:3, 2] = -key_dir
-    key_light_pose[:3, 3] = cam_pos
-    scene.add(key_light, pose=key_light_pose)
-
-    # Fill light: from opposite side at 30% intensity
-    fill_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=1.2)
-    fill_light_pose = np.eye(4)
-    fill_dir = np.array([0.0, 0.1, -1.0])
-    fill_dir = fill_dir / np.linalg.norm(fill_dir)
-    fill_right = np.cross(fill_dir, world_up)
-    fill_right_norm = np.linalg.norm(fill_right)
-    if fill_right_norm > 1e-9:
-        fill_right = fill_right / fill_right_norm
-    else:
-        fill_right = np.array([1.0, 0.0, 0.0])
-    fill_up = np.cross(fill_right, fill_dir)
-    fill_light_pose[:3, 0] = fill_right
-    fill_light_pose[:3, 1] = fill_up
-    fill_light_pose[:3, 2] = -fill_dir
-    fill_light_pose[:3, 3] = cam_pos + np.array([0.0, -y_range * 0.3, 0.0])
-    scene.add(fill_light, pose=fill_light_pose)
-
-    # Render offscreen
-    try:
-        renderer = pyrender.OffscreenRenderer(
-            viewport_width=image_size,
-            viewport_height=image_size,
-        )
-        color, _ = renderer.render(scene)
-        renderer.delete()
-    except Exception as exc:
-        log.warning("pyrender offscreen render failed: %s", exc)
-        return None
-
-    return color
-
-
-def _detect_on_image(
-    img_rgb: np.ndarray,
-    image_size: int,
-) -> Optional[np.ndarray]:
-    """Run MediaPipe FaceLandmarker on an RGB image.
-
-    Returns (478, 2) float64 pixel coords or None if no face detected.
-    """
-    try:
-        import mediapipe as mp
-        from mediapipe.tasks import python as mp_python
-        from mediapipe.tasks.python import vision as mp_vision
-    except ImportError:
-        return None
-
-    if not MODEL_PATH.exists():
-        return None
-
-    # Convert to uint8 if needed
-    if img_rgb.dtype != np.uint8:
-        img_rgb = np.clip(img_rgb, 0, 255).astype(np.uint8)
-
-    # Ensure 3-channel
-    if img_rgb.ndim == 2:
-        img_rgb = np.stack([img_rgb, img_rgb, img_rgb], axis=-1)
-    elif img_rgb.shape[2] == 4:
-        img_rgb = img_rgb[:, :, :3]
-
-    mp_image = mp.Image(
-        image_format=mp.ImageFormat.SRGB,
-        data=img_rgb,
-    )
-
-    options = mp_vision.FaceLandmarkerOptions(
-        base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
-        running_mode=mp_vision.RunningMode.IMAGE,
-        num_faces=1,
-        min_face_detection_confidence=0.3,
-        min_face_presence_confidence=0.3,
-    )
-    with mp_vision.FaceLandmarker.create_from_options(options) as landmarker:
-        result = landmarker.detect(mp_image)
-
-    if not result.face_landmarks:
-        return None
-
-    lms = result.face_landmarks[0]
-    h, w = img_rgb.shape[:2]
-    pixels = np.array(
-        [[lm.x * w, lm.y * h] for lm in lms],
-        dtype=np.float64,
-    )
-    return pixels
-
-
-def _render_and_detect(mesh: trimesh.Trimesh, image_size: int) -> Optional[np.ndarray]:
-    """Render *mesh* to a frontal image and run FaceLandmarker.
-
-    Tries pyrender (lit with directional lighting) first, then falls back to
-    the CPU depth-shaded rasterizer.
-
-    Returns (478, 2) float64 pixel coords or None.
-    """
-    try:
-        import mediapipe as mp  # noqa: F401
-        from mediapipe.tasks import python as mp_python  # noqa: F401
-        from mediapipe.tasks.python import vision as mp_vision  # noqa: F401
-    except ImportError:
-        log.info("mediapipe not installed; landmark detection unavailable.")
-        return None
-
-    if not MODEL_PATH.exists():
-        log.warning(
-            "FaceLandmarker model missing at '%s'. "
-            "Download: curl -L 'https://storage.googleapis.com/mediapipe-models/"
-            "face_landmarker/face_landmarker/float16/1/face_landmarker.task' -o %s",
-            MODEL_PATH, MODEL_PATH,
-        )
-        return None
-
-    verts = np.asarray(mesh.vertices, dtype=np.float64)
-    x, y = verts[:, 0], verts[:, 1]
-    x_range_raw = float(x.max() - x.min())
-    y_range_raw = float(y.max() - y.min())
-    if x_range_raw < 1e-9 or y_range_raw < 1e-9:
-        log.warning("Landmark detection: degenerate XY range — skipping.")
-        return None
-
-    # ── Attempt 1: pyrender with directional lighting ──────────────────────
-    pyrender_img = _render_pyrender(mesh, image_size)
-    if pyrender_img is not None:
-        pixels = _detect_on_image(pyrender_img, image_size)
-        if pixels is not None:
-            log.info("Landmark detection succeeded with pyrender-lit image.")
-            return pixels
-        log.info("MediaPipe failed on pyrender image; falling back to CPU rasterizer.")
-
-    # ── Attempt 2: CPU depth-shaded rasterizer (original path) ─────────────
-    PAD = 0.05
-    x_min = x.min() - x_range_raw * PAD; x_range = x_range_raw * (1.0 + 2 * PAD)
-    y_min = y.min() - y_range_raw * PAD; y_range = y_range_raw * (1.0 + 2 * PAD)
-    px = np.clip(((x - x_min) / x_range * (image_size - 1)).astype(np.int32), 0, image_size - 1)
-    py = np.clip(((1.0 - (y - y_min) / y_range) * (image_size - 1)).astype(np.int32), 0, image_size - 1)
-
-    img = _rasterize(mesh, verts, np.asarray(mesh.faces, dtype=np.int32), px, py, image_size)
-    img_rgb = np.stack([img, img, img], axis=-1)
-
-    pixels = _detect_on_image(img_rgb, image_size)
-    if pixels is None:
-        log.warning("No face detected in rendered vertex image.")
-    return pixels
-
-
-def _rasterize(
-    mesh: trimesh.Trimesh,
-    verts: np.ndarray,
-    faces: np.ndarray,
-    px: np.ndarray,
-    py: np.ndarray,
-    image_size: int,
-) -> np.ndarray:
-    """Painter's-algorithm CPU rasterizer: front-facing triangles, depth-shaded."""
-    img = np.zeros((image_size, image_size), dtype=np.uint8)
-    normals = mesh.face_normals
-    front = normals[:, 2] > 0.0
-    z_face = verts[faces, 2].mean(axis=1)
-    front_idx = np.where(front)[0]
-    if len(front_idx) == 0:
-        return img
-
-    order = front_idx[np.argsort(z_face[front_idx])]
-    sf = faces[order]
-    sz = z_face[order]
-    z_lo, z_hi = float(sz[0]), float(sz[-1])
-    z_rng = max(z_hi - z_lo, 1e-9)
-    N_LV = 20
-    lv_arr = np.floor((sz - z_lo) / z_rng * (N_LV - 1)).astype(np.int32).clip(0, N_LV - 1)
-    pts2d = np.stack([px, py], axis=1).astype(np.int32)
-
-    try:
-        import cv2
-        for lv in range(N_LV):
-            sel = lv_arr == lv
-            if not sel.any():
-                continue
-            color = int(80 + lv / (N_LV - 1) * 140)
-            tris = pts2d[sf[sel]]
-            cv2.fillPoly(img, list(tris.reshape(-1, 3, 1, 2)), color=color)
-        return img
-    except ImportError:
-        pass
-
-    try:
-        from PIL import Image as PILImage, ImageDraw
-        pil = PILImage.fromarray(img, mode="L")
-        draw = ImageDraw.Draw(pil)
-        for lv in range(N_LV):
-            sel = lv_arr == lv
-            if not sel.any():
-                continue
-            color = int(80 + lv / (N_LV - 1) * 140)
-            for f in sf[sel]:
-                tri = [(int(pts2d[f[i], 0]), int(pts2d[f[i], 1])) for i in range(3)]
-                draw.polygon(tri, fill=color)
-        return np.array(pil)
-    except ImportError:
-        pass
-
-    # Last-resort dot fallback
-    log.warning("No cv2/PIL available; using large-dot landmark render fallback.")
-    for dy in range(-4, 5):
-        for dx in range(-4, 5):
-            if dx * dx + dy * dy <= 16:
-                img[
-                    np.clip(py + dy, 0, image_size - 1),
-                    np.clip(px + dx, 0, image_size - 1),
-                ] = 200
-    return img
 
 
 # ---------------------------------------------------------------------------

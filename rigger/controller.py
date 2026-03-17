@@ -10,7 +10,7 @@ import numpy as np
 
 from rigger.aligner import align_icp
 from rigger.glb_writer import patch_glb_add_morph_targets
-from rigger.landmarks import detect_landmarks
+from rigger.landmarks import detect_landmarks_from_vertices
 from rigger.mouth_slit import cut_mouth_slit
 from rigger.separator import separate_head_body
 from rigger.transfer import (
@@ -59,10 +59,10 @@ def run_rig_attempt(
         log.info("Cutting mouth slit...")
         head_mesh = cut_mouth_slit(head_mesh)
 
-        log.info("Detecting MediaPipe landmarks...")
+        log.info("Detecting face landmarks from geometry...")
         lm_result = None
         try:
-            lm_result = detect_landmarks(head_mesh)
+            lm_result = detect_landmarks_from_vertices(head_mesh)
             if lm_result is not None:
                 log.info("Landmarks detected — using landmark-NICP alignment.")
             else:
@@ -84,7 +84,7 @@ def run_rig_attempt(
         aligned_lm_result = None
         if use_pou_rbf:
             try:
-                aligned_lm_result = detect_landmarks(aligned_head)
+                aligned_lm_result = detect_landmarks_from_vertices(aligned_head)
                 if aligned_lm_result is not None:
                     log.info("Aligned-mesh landmarks detected — POU-RBF enabled.")
                 else:
