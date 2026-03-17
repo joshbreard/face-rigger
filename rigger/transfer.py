@@ -1262,9 +1262,25 @@ _RBF_MAX_EVAL_VERTS: int = 3000
 threshold are decimated for the RBF solve, then results are up-sampled to
 the full vertex set via nearest-neighbour lookup."""
 
-_RBF_BATCH_TIMEOUT_S: float = 10.0
-"""Per-batch wall-clock timeout.  If a batch of blendshapes exceeds this,
-timed-out shapes fall back to IDW and a warning is logged."""
+_RBF_MAX_CENTERS: int = 500
+"""Maximum Claire vertices used as RBF centers in a single region.
+Regions exceeding this are stride-subsampled to keep the O(N^3) dense
+solve under ~0.1 s.  Eye and mouth regions on high-res Claire meshes
+can easily exceed 2 000 vertices, causing multi-second hangs without
+this cap."""
+
+_RBF_SMOOTHING_BASE: float = 1e-3
+"""Tikhonov (ridge) regularisation floor for the RBF solve."""
+
+_RBF_SMOOTHING_PER_CENTER: float = 2e-6
+"""Extra ridge added per RBF center.  Denser regions get stronger
+regularisation to compensate for ill-conditioned kernel matrices
+(tightly packed eye / mouth vertices)."""
+
+_RBF_PER_SHAPE_TIMEOUT_S: float = 4.0
+"""Wall-clock timeout applied to each individual blendshape via
+``as_completed``.  Replaces the old shared-budget batch timeout that
+let one hung future consume the whole 10 s window."""
 
 
 def _pou_rbf_single_worker(
@@ -1313,10 +1329,10 @@ def _pou_rbf_single_worker(
 
     for r_idx in regions:
         # --- timeout check at region granularity ---
-        if (time.time() - t0) > _RBF_BATCH_TIMEOUT_S:
+        if (time.time() - t0) > _RBF_PER_SHAPE_TIMEOUT_S:
             _log.warning(
-                "POU-RBF timeout (%.0fs) on '%s' — falling back to IDW.",
-                _RBF_BATCH_TIMEOUT_S, name,
+                "POU-RBF timeout (%.1fs) on '%s' — falling back to IDW.",
+                _RBF_PER_SHAPE_TIMEOUT_S, name,
             )
             return _idw_full()
 
@@ -1331,8 +1347,21 @@ def _pou_rbf_single_worker(
             target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
             continue
 
+        # ── Cap RBF centres to prevent O(N^3) blowup ─────────────────
+        n_raw = len(claire_r_idx)
+        if n_raw > _RBF_MAX_CENTERS:
+            stride_c = max(1, n_raw // _RBF_MAX_CENTERS)
+            claire_r_idx = claire_r_idx[::stride_c]
+            _log.debug(
+                "Region %d: subsampled Claire centres %d → %d (stride %d) for '%s'",
+                r_idx, n_raw, len(claire_r_idx), stride_c, name,
+            )
+
         cp_pos = claire_neutral[claire_r_idx]
         cp_disp = claire_disp[claire_r_idx]
+
+        # ── Scale regularisation with centre density ──────────────────
+        smoothing = _RBF_SMOOTHING_BASE + len(cp_pos) * _RBF_SMOOTHING_PER_CENTER
 
         # ── Decide whether to evaluate on decimated proxy ──────────────
         if use_decimated:
@@ -1351,7 +1380,7 @@ def _pou_rbf_single_worker(
                 cp_pos, cp_disp,
                 kernel="thin_plate_spline",
                 degree=1,
-                smoothing=1e-3,
+                smoothing=smoothing,
             )
             r_disp_eval = rbf(eval_pos)
         except Exception:
@@ -1469,7 +1498,10 @@ def transfer_morph_targets_pou_rbf(
         disp = (c_disp[idxs] * w[:, :, np.newaxis]).sum(axis=1)
         return bs_name, disp
 
-    from concurrent.futures import TimeoutError as FuturesTimeoutError
+    from concurrent.futures import (
+        TimeoutError as FuturesTimeoutError,
+        as_completed,
+    )
 
     results: list[tuple[str, np.ndarray]] = []
     with ProcessPoolExecutor(max_workers=_BATCH_SIZE) as executor:
@@ -1494,13 +1526,23 @@ def transfer_morph_targets_pou_rbf(
             batch_results: list[tuple[str, np.ndarray]] = []
             timed_out_names: list[str] = []
 
-            for fut in futures:
-                bs_name = futures[fut]
-                remaining = _RBF_BATCH_TIMEOUT_S - (time.time() - t_batch_start)
-                try:
-                    result = fut.result(timeout=max(0.0, remaining))
-                    batch_results.append(result)
-                except FuturesTimeoutError:
+            # Collect completed futures; any still running after the
+            # per-shape timeout are treated as timed-out.
+            done: set = set()
+            try:
+                for fut in as_completed(futures, timeout=_RBF_PER_SHAPE_TIMEOUT_S):
+                    done.add(fut)
+                    try:
+                        batch_results.append(fut.result())
+                    except Exception as exc:
+                        bs_name = futures[fut]
+                        log.warning("POU-RBF worker error on '%s': %s", bs_name, exc)
+                        timed_out_names.append(bs_name)
+            except FuturesTimeoutError:
+                pass
+
+            for fut, bs_name in futures.items():
+                if fut not in done:
                     timed_out_names.append(bs_name)
                     fut.cancel()
 

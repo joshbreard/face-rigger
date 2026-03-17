@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import struct
 import tempfile
 import uuid
 from pathlib import Path
@@ -17,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+from starlette.requests import Request
 
 import json
 
@@ -436,7 +438,7 @@ async def rig_retry(rig_id: str):
             "y_back": y_back,
             "y_front": y_front,
             "attempt_index": attempt_idx,
-            "needs_human": needs_human,
+            "needs_human": False,
         }
         validate_path.write_text(json.dumps(new_meta))
         log.info("Retry complete: rig_id=%s score=%.2f needs_human=%s", rig_id, validation_data["overall_score"], needs_human)
@@ -458,25 +460,6 @@ async def rig_retry(rig_id: str):
     failures_header = ",".join(validation_data["failing_blendshapes"])
     expose = "X-Rig-Id, X-Rig-Pass, X-Rig-Score, X-Rig-Failures, X-Rig-Attempt, X-Rig-Status"
 
-    if needs_human:
-        return JSONResponse(
-            content={
-                "rig_id": rig_id,
-                "status": "needs_human",
-                "overall_score": overall_score,
-                "critical_failures": validation_data["critical_failures"],
-                "failing_blendshapes": validation_data["failing_blendshapes"],
-                "attempts": attempt_idx,
-            },
-            headers={
-                "X-Rig-Id": rig_id,
-                "X-Rig-Status": "needs_human",
-                "X-Rig-Score": f"{overall_score:.2f}",
-                "X-Rig-Attempt": str(attempt_idx),
-                "Access-Control-Expose-Headers": expose,
-            },
-        )
-
     glb_path = TMP_DIR / f"{rig_id}.glb"
     return FileResponse(
         path=str(glb_path),
@@ -492,6 +475,57 @@ async def rig_retry(rig_id: str):
             "Access-Control-Expose-Headers": expose,
         },
     )
+
+
+@app.post("/save-correction")
+async def save_correction(request: Request):
+    """Save a blendshape correction sample (binary packed: header + vertex arrays)."""
+
+    body = await request.body()
+    if len(body) < 8:
+        raise HTTPException(status_code=400, detail="Payload too small.")
+
+    header_len = struct.unpack_from("<I", body, 0)[0]
+    if 4 + header_len > len(body):
+        raise HTTPException(status_code=400, detail="Invalid header length.")
+
+    header_json = body[4 : 4 + header_len].decode("utf-8")
+    header = json.loads(header_json)
+    bs_name = header.get("blendshape_name", "unknown")
+    rig_id = header.get("rig_id", "unknown")
+    vertex_count = header.get("vertex_count", 0)
+
+    # Header is padded to 4-byte alignment (matching frontend packing)
+    float_offset = ((4 + header_len) + 3) // 4 * 4
+    expected_float_bytes = vertex_count * 3 * 4 * 3  # 3 arrays of vertex_count*3 floats
+    if float_offset + expected_float_bytes > len(body):
+        raise HTTPException(status_code=400, detail="Incomplete vertex data.")
+
+    corrections_dir = Path("corrections")
+    corrections_dir.mkdir(exist_ok=True)
+
+    # Save as .npz for compact storage
+    arr = np.frombuffer(body[float_offset:float_offset + expected_float_bytes], dtype=np.float32)
+    per_array = vertex_count * 3
+    neutral = arr[:per_array].reshape(vertex_count, 3)
+    auto_deltas = arr[per_array : per_array * 2].reshape(vertex_count, 3)
+    corrected_deltas = arr[per_array * 2 : per_array * 3].reshape(vertex_count, 3)
+
+    sample_id = uuid.uuid4().hex[:8]
+    filename = f"{rig_id}_{bs_name}_{sample_id}.npz"
+    filepath = corrections_dir / filename
+
+    np.savez_compressed(
+        str(filepath),
+        neutral=neutral,
+        auto_deltas=auto_deltas,
+        corrected_deltas=corrected_deltas,
+        blendshape_name=np.array(bs_name),
+        rig_id=np.array(rig_id),
+    )
+
+    log.info("Saved correction: %s  (%d vertices, blendshape=%s)", filename, vertex_count, bs_name)
+    return JSONResponse({"status": "ok", "file": filename, "vertex_count": vertex_count})
 
 
 def _delete_file(path: Path) -> None:

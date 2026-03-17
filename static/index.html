@@ -271,7 +271,7 @@
 
     .morph-row {
       display: grid;
-      grid-template-columns: 20px 1fr 80px;
+      grid-template-columns: 20px 1fr 80px 28px;
       align-items: center;
       gap: 8px;
       padding: 5px 12px;
@@ -655,6 +655,100 @@
       cursor: pointer;
     }
 
+    /* ── Correction editor ────────────────────────────────────────────── */
+    .morph-edit-btn {
+      background: none;
+      border: 1px solid #2a2a35;
+      border-radius: 4px;
+      color: #6b6b75;
+      font-size: 0.68rem;
+      cursor: pointer;
+      padding: 1px 5px;
+      transition: all 0.15s;
+      line-height: 1.2;
+    }
+    .morph-edit-btn:hover {
+      border-color: #6e6eff;
+      color: #a0a0ff;
+    }
+
+    #edit-toolbar {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      z-index: 10;
+      background: rgba(17, 17, 20, 0.95);
+      backdrop-filter: blur(6px);
+      border-bottom: 1px solid #2a2a30;
+      padding: 8px 14px;
+      display: none;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.78rem;
+      color: #c0c0d0;
+    }
+    #edit-bs-name {
+      font-weight: 600;
+      color: #a0a0ff;
+      margin-right: auto;
+    }
+    .edit-tool-group { display: flex; gap: 4px; }
+    .edit-tool-btn {
+      background: #1e1e24;
+      border: 1px solid #2a2a35;
+      border-radius: 5px;
+      color: #8888a0;
+      font-size: 0.72rem;
+      padding: 4px 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .edit-tool-btn:hover { border-color: #4a4a60; }
+    .edit-tool-btn.active {
+      background: rgba(110, 110, 255, 0.12);
+      border-color: #6e6eff;
+      color: #a0a0ff;
+    }
+    .edit-sep {
+      width: 1px;
+      height: 20px;
+      background: #2a2a35;
+      flex-shrink: 0;
+    }
+    .edit-brush-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #6b6b75;
+      font-size: 0.72rem;
+    }
+    #edit-brush-slider { width: 60px; accent-color: #6e6eff; }
+    .edit-action-btn {
+      background: none;
+      border: 1px solid #2a2a35;
+      border-radius: 5px;
+      color: #8888a0;
+      font-size: 0.72rem;
+      padding: 4px 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .edit-action-btn:hover { background: rgba(255,255,255,0.04); }
+    .edit-save-btn {
+      background: rgba(34, 197, 94, 0.12) !important;
+      border-color: #22c55e !important;
+      color: #86efac !important;
+    }
+    .edit-save-btn:hover { background: rgba(34, 197, 94, 0.2) !important; }
+    #edit-brush-cursor {
+      position: absolute;
+      border: 1.5px solid rgba(110, 110, 255, 0.5);
+      border-radius: 50%;
+      pointer-events: none;
+      display: none;
+      z-index: 11;
+      transform: translate(-50%, -50%);
+    }
+
     /* ── Responsive collapse ───────────────────────────────────────────── */
     @media (max-width: 680px) {
       #preview-panel {
@@ -786,6 +880,23 @@
             <div class="spinner" style="width:28px;height:28px;border-width:2px;"></div>
             <span>Loading preview…</span>
           </div>
+          <!-- Correction editor toolbar -->
+          <div id="edit-toolbar">
+            <span id="edit-bs-name"></span>
+            <div class="edit-tool-group">
+              <button class="edit-tool-btn active" id="edit-select-btn" title="Brush select vertices (LMB drag, Shift = deselect)">Select</button>
+              <button class="edit-tool-btn" id="edit-move-btn" title="Drag to move selected vertices">Move</button>
+            </div>
+            <div class="edit-sep"></div>
+            <label class="edit-brush-label">Brush <input type="range" id="edit-brush-slider" min="5" max="60" value="20" /></label>
+            <div class="edit-sep"></div>
+            <button class="edit-action-btn" id="edit-select-all-btn">All</button>
+            <button class="edit-action-btn" id="edit-clear-sel-btn">Clear</button>
+            <div class="edit-sep"></div>
+            <button class="edit-action-btn edit-save-btn" id="edit-save-btn">Save</button>
+            <button class="edit-action-btn" id="edit-cancel-btn">Cancel</button>
+          </div>
+          <div id="edit-brush-cursor"></div>
         </div>
 
         <div id="morph-panel">
@@ -933,6 +1044,33 @@
     let activeLandmark = null;
     let placedLandmarks = {};  // name -> {position: Vector3, marker: Mesh}
     let humRaycaster = new THREE.Raycaster();
+
+    // ── Correction editor state ──────────────────────────────────────────
+    let editMode = false;
+    let editMorphIdx = null;
+    let editMorphName = null;
+    let editPointsMesh = null;
+    let editOriginalDeltas = null;
+    let editSelectedVerts = new Set();
+    let editAffectedSet = new Set();
+    let editHoveredVerts = new Set();
+    let editOriginalMaterials = [];
+    let editHeadBBox = null;
+    let editTool = 'select';
+    let editBrushRadius = 20;
+    let editDragging = false;
+    let editLastScreenPos = null;
+
+    const editToolbar      = document.getElementById('edit-toolbar');
+    const editBsName       = document.getElementById('edit-bs-name');
+    const editSelectBtn    = document.getElementById('edit-select-btn');
+    const editMoveBtn      = document.getElementById('edit-move-btn');
+    const editBrushSlider  = document.getElementById('edit-brush-slider');
+    const editSelectAllBtn = document.getElementById('edit-select-all-btn');
+    const editClearSelBtn  = document.getElementById('edit-clear-sel-btn');
+    const editSaveBtn      = document.getElementById('edit-save-btn');
+    const editCancelBtn    = document.getElementById('edit-cancel-btn');
+    const editBrushCursor  = document.getElementById('edit-brush-cursor');
 
     // ── Section switcher ────────────────────────────────────────────────
     function showSection(section) {
@@ -1782,6 +1920,7 @@
     }
 
     function _teardownRenderer() {
+      if (editMode) _exitEditMode(false);
       if (animId) cancelAnimationFrame(animId);
       if (currentAnimId) cancelAnimationFrame(currentAnimId);
       currentAnimId = null;
@@ -1835,9 +1974,19 @@
           if (headMesh) headMesh.morphTargetInfluences[idx] = parseFloat(slider.value);
         });
 
+        const editBtn = document.createElement('button');
+        editBtn.className = 'morph-edit-btn';
+        editBtn.textContent = '✎';
+        editBtn.title = 'Edit morph target';
+        editBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          _enterEditMode(idx, name);
+        });
+
         row.appendChild(statusEl);
         row.appendChild(nameEl);
         row.appendChild(slider);
+        row.appendChild(editBtn);
         morphList.appendChild(row);
       }
     }
@@ -1876,6 +2025,540 @@
         }
       }
       currentAnimId = requestAnimationFrame(step);
+    }
+
+    // ── Correction editor ─────────────────────────────────────────────
+
+    editSelectBtn.addEventListener('click', () => _setEditTool('select'));
+    editMoveBtn.addEventListener('click', () => _setEditTool('move'));
+    editBrushSlider.addEventListener('input', () => {
+      editBrushRadius = parseInt(editBrushSlider.value);
+      _updateBrushCursor();
+    });
+    editSelectAllBtn.addEventListener('click', () => {
+      if (!headMesh || editMorphIdx === null) return;
+      const baseAttr = headMesh.geometry.attributes.position;
+      const tmpV = new THREE.Vector3();
+      for (let i = 0; i < baseAttr.count; i++) {
+        tmpV.set(baseAttr.getX(i), baseAttr.getY(i), baseAttr.getZ(i));
+        if (editHeadBBox && editHeadBBox.containsPoint(tmpV)) {
+          editSelectedVerts.add(i);
+        }
+      }
+      _updateEditPointColors();
+    });
+    editClearSelBtn.addEventListener('click', () => {
+      editSelectedVerts.clear();
+      _updateEditPointColors();
+    });
+    editSaveBtn.addEventListener('click', () => _exitEditMode(true));
+    editCancelBtn.addEventListener('click', () => _exitEditMode(false));
+
+    function _setEditTool(tool) {
+      editTool = tool;
+      editSelectBtn.classList.toggle('active', tool === 'select');
+      editMoveBtn.classList.toggle('active', tool === 'move');
+      canvasEl.style.cursor = tool === 'select' ? 'crosshair' : 'grab';
+      editBrushCursor.style.display = (tool === 'select') ? 'block' : 'none';
+    }
+
+    function _updateBrushCursor(e) {
+      if (!editMode || editTool !== 'select') {
+        editBrushCursor.style.display = 'none';
+        return;
+      }
+      const d = editBrushRadius * 2;
+      editBrushCursor.style.width = d + 'px';
+      editBrushCursor.style.height = d + 'px';
+      if (e) {
+        const rect = document.getElementById('canvas-wrap').getBoundingClientRect();
+        editBrushCursor.style.left = (e.clientX - rect.left) + 'px';
+        editBrushCursor.style.top = (e.clientY - rect.top) + 'px';
+      }
+    }
+
+    function _enterEditMode(idx, name) {
+      if (editMode) _exitEditMode(false);
+      if (!headMesh) return;
+
+      editMode = true;
+      editMorphIdx = idx;
+      editMorphName = name;
+      editSelectedVerts = new Set();
+      editHoveredVerts = new Set();
+      editBsName.textContent = 'Editing: ' + name;
+
+      // Backup original deltas
+      const deltaAttr = headMesh.geometry.morphAttributes.position[idx];
+      editOriginalDeltas = new Float32Array(deltaAttr.array);
+
+      // Set morph influence to 1.0
+      if (currentAnimId) { cancelAnimationFrame(currentAnimId); currentAnimId = null; }
+      headMesh.morphTargetInfluences.fill(0);
+      headMesh.morphTargetInfluences[idx] = 1.0;
+      document.querySelectorAll('.morph-slider').forEach(s => { s.value = 0; });
+      const activeSlider = morphList.querySelector('.morph-row[data-idx="' + idx + '"] .morph-slider');
+      if (activeSlider) activeSlider.value = 1;
+
+      // ── Make mesh semi-transparent so face shape is still visible ──
+      editOriginalMaterials = [];
+      const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
+      for (const mat of mats) {
+        editOriginalMaterials.push({
+          ref: mat,
+          transparent: mat.transparent,
+          opacity: mat.opacity,
+          depthWrite: mat.depthWrite,
+        });
+        mat.transparent = true;
+        mat.opacity = 0.3;
+        mat.depthWrite = false;
+        mat.needsUpdate = true;
+      }
+
+      // Determine affected vertices
+      editAffectedSet = new Set();
+      for (let i = 0; i < deltaAttr.count; i++) {
+        if (deltaAttr.getX(i) !== 0 || deltaAttr.getY(i) !== 0 || deltaAttr.getZ(i) !== 0) {
+          editAffectedSet.add(i);
+        }
+      }
+
+      // ── Compute head bounding box from affected vertices ──
+      const baseAttr = headMesh.geometry.attributes.position;
+      const vertCount = baseAttr.count;
+      editHeadBBox = new THREE.Box3();
+      const tmpV = new THREE.Vector3();
+      for (const i of editAffectedSet) {
+        tmpV.set(baseAttr.getX(i), baseAttr.getY(i), baseAttr.getZ(i));
+        editHeadBBox.expandByPoint(tmpV);
+      }
+      // Expand 15% so "All" grabs a generous head region
+      const bboxPad = editHeadBBox.getSize(new THREE.Vector3()).multiplyScalar(0.15);
+      editHeadBBox.expandByVector(bboxPad);
+
+      // ── Create Points overlay with per-vertex size + color ──
+      const positions = new Float32Array(vertCount * 3);
+      const colors    = new Float32Array(vertCount * 3);
+      const sizes     = new Float32Array(vertCount);
+
+      for (let i = 0; i < vertCount; i++) {
+        positions[i * 3]     = baseAttr.getX(i) + deltaAttr.getX(i);
+        positions[i * 3 + 1] = baseAttr.getY(i) + deltaAttr.getY(i);
+        positions[i * 3 + 2] = baseAttr.getZ(i) + deltaAttr.getZ(i);
+        // Default: light gray, small
+        colors[i * 3] = 0.75; colors[i * 3 + 1] = 0.75; colors[i * 3 + 2] = 0.78;
+        sizes[i] = 1.5;
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute('aColor',   new THREE.BufferAttribute(colors, 3));
+      geo.setAttribute('aSize',    new THREE.BufferAttribute(sizes, 1));
+
+      const dpr = renderer.getPixelRatio();
+      const pointsMat = new THREE.ShaderMaterial({
+        uniforms: { uPixelRatio: { value: dpr } },
+        vertexShader: [
+          'uniform float uPixelRatio;',
+          'attribute float aSize;',
+          'attribute vec3 aColor;',
+          'varying vec3 vColor;',
+          'void main() {',
+          '  vColor = aColor;',
+          '  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);',
+          '  gl_PointSize = aSize * uPixelRatio;',
+          '  gl_Position = projectionMatrix * mvPos;',
+          '}',
+        ].join('\n'),
+        fragmentShader: [
+          'varying vec3 vColor;',
+          'void main() {',
+          '  vec2 c = gl_PointCoord - vec2(0.5);',
+          '  if (dot(c, c) > 0.25) discard;',
+          '  gl_FragColor = vec4(vColor, 0.9);',
+          '}',
+        ].join('\n'),
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+      });
+
+      editPointsMesh = new THREE.Points(geo, pointsMat);
+      editPointsMesh.renderOrder = 100;
+      editPointsMesh.frustumCulled = false;
+      headMesh.add(editPointsMesh);
+
+      // Show toolbar
+      editToolbar.style.display = 'flex';
+      _setEditTool('select');
+
+      // Free LMB for editing, orbit on RMB
+      controls.mouseButtons = {
+        LEFT: null,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.ROTATE,
+      };
+
+      // Install pointer handlers
+      canvasEl.addEventListener('pointerdown', _onEditPointerDown);
+      canvasEl.addEventListener('pointermove', _onEditPointerMove);
+      canvasEl.addEventListener('pointerup', _onEditPointerUp);
+      canvasEl.addEventListener('pointercancel', _onEditPointerUp);
+
+      // Dim morph list while editing
+      morphList.style.pointerEvents = 'none';
+      morphList.style.opacity = '0.5';
+    }
+
+    async function _exitEditMode(save) {
+      if (!editMode) return;
+
+      if (!save && editOriginalDeltas && headMesh) {
+        // Restore original deltas
+        const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+        deltaAttr.array.set(editOriginalDeltas);
+        deltaAttr.needsUpdate = true;
+      }
+
+      if (save && headMesh) {
+        // ── Persist corrected morph target in memory ──
+        const baseAttr = headMesh.geometry.attributes.position;
+        const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+        const count = baseAttr.count;
+
+        // Compute corrected deltas and write as a new BufferAttribute
+        const newDeltas = new Float32Array(count * 3);
+        for (let i = 0; i < count; i++) {
+          newDeltas[i * 3]     = deltaAttr.getX(i);
+          newDeltas[i * 3 + 1] = deltaAttr.getY(i);
+          newDeltas[i * 3 + 2] = deltaAttr.getZ(i);
+        }
+        headMesh.geometry.morphAttributes.position[editMorphIdx] =
+          new THREE.Float32BufferAttribute(newDeltas, 3);
+        headMesh.geometry.attributes.position.needsUpdate = true;
+
+        // Save correction to backend
+        await _saveCorrection();
+      }
+
+      // ── Dispose points overlay ──
+      if (editPointsMesh) {
+        if (headMesh) headMesh.remove(editPointsMesh);
+        editPointsMesh.geometry.dispose();
+        editPointsMesh.material.dispose();
+        editPointsMesh = null;
+      }
+
+      // ── Restore original mesh material (full opacity) ──
+      for (const saved of editOriginalMaterials) {
+        saved.ref.transparent = saved.transparent;
+        saved.ref.opacity     = saved.opacity;
+        saved.ref.depthWrite  = saved.depthWrite;
+        saved.ref.needsUpdate = true;
+      }
+      editOriginalMaterials = [];
+
+      // Reset morph influence
+      if (headMesh) {
+        headMesh.morphTargetInfluences[editMorphIdx] = 0;
+        const activeSlider = morphList.querySelector('.morph-row[data-idx="' + editMorphIdx + '"] .morph-slider');
+        if (activeSlider) activeSlider.value = 0;
+      }
+
+      // Hide toolbar + brush cursor
+      editToolbar.style.display = 'none';
+      editBrushCursor.style.display = 'none';
+
+      // Restore orbit controls
+      if (controls) {
+        controls.mouseButtons = {
+          LEFT: THREE.MOUSE.ROTATE,
+          MIDDLE: THREE.MOUSE.DOLLY,
+          RIGHT: THREE.MOUSE.PAN,
+        };
+      }
+
+      // Remove edit handlers
+      canvasEl.removeEventListener('pointerdown', _onEditPointerDown);
+      canvasEl.removeEventListener('pointermove', _onEditPointerMove);
+      canvasEl.removeEventListener('pointerup', _onEditPointerUp);
+      canvasEl.removeEventListener('pointercancel', _onEditPointerUp);
+      canvasEl.style.cursor = '';
+
+      // Re-enable morph list
+      morphList.style.pointerEvents = '';
+      morphList.style.opacity = '';
+
+      // Rebuild morph list to update status indicators after save
+      if (save) _buildMorphList();
+
+      editMode = false;
+      editMorphIdx = null;
+      editMorphName = null;
+      editOriginalDeltas = null;
+      editSelectedVerts = new Set();
+      editAffectedSet = new Set();
+      editHoveredVerts = new Set();
+      editHeadBBox = null;
+    }
+
+    function _updateEditPointColors() {
+      if (!editPointsMesh) return;
+      const colAttr  = editPointsMesh.geometry.attributes.aColor;
+      const sizeAttr = editPointsMesh.geometry.attributes.aSize;
+      const count    = colAttr.count;
+      for (let i = 0; i < count; i++) {
+        if (editSelectedVerts.has(i)) {
+          // Bright blue #4488ff
+          colAttr.setXYZ(i, 0.267, 0.533, 1.0);
+          sizeAttr.setX(i, 4.0);
+        } else if (editHoveredVerts.has(i)) {
+          // Yellow hover #ffcc00
+          colAttr.setXYZ(i, 1.0, 0.8, 0.0);
+          sizeAttr.setX(i, 3.0);
+        } else {
+          // Light gray
+          colAttr.setXYZ(i, 0.75, 0.75, 0.78);
+          sizeAttr.setX(i, 1.5);
+        }
+      }
+      colAttr.needsUpdate = true;
+      sizeAttr.needsUpdate = true;
+    }
+
+    function _updateEditPointPositions() {
+      if (!editPointsMesh || !headMesh) return;
+      const baseAttr = headMesh.geometry.attributes.position;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const ptAttr = editPointsMesh.geometry.attributes.position;
+      for (let i = 0; i < baseAttr.count; i++) {
+        ptAttr.setXYZ(i,
+          baseAttr.getX(i) + deltaAttr.getX(i),
+          baseAttr.getY(i) + deltaAttr.getY(i),
+          baseAttr.getZ(i) + deltaAttr.getZ(i),
+        );
+      }
+      ptAttr.needsUpdate = true;
+      editPointsMesh.geometry.computeBoundingSphere();
+    }
+
+    function _onEditPointerDown(e) {
+      if (e.button !== 0) return;
+      if (!editMode || !headMesh) return;
+
+      e.preventDefault();
+      editDragging = true;
+      editLastScreenPos = new THREE.Vector2(e.clientX, e.clientY);
+      canvasEl.setPointerCapture(e.pointerId);
+
+      if (editTool === 'select') {
+        _brushSelect(e, !e.shiftKey);
+      } else if (editTool === 'move') {
+        canvasEl.style.cursor = 'grabbing';
+      }
+    }
+
+    function _onEditPointerMove(e) {
+      if (!editMode) return;
+
+      if (editTool === 'select') {
+        _updateBrushCursor(e);
+        // Hover highlight when not actively dragging
+        if (!editDragging) {
+          editHoveredVerts = _vertsInBrush(e);
+          _updateEditPointColors();
+        }
+      }
+
+      if (!editDragging) return;
+
+      if (editTool === 'select') {
+        _brushSelect(e, !e.shiftKey);
+      } else if (editTool === 'move' && editSelectedVerts.size > 0) {
+        const dx = e.clientX - editLastScreenPos.x;
+        const dy = e.clientY - editLastScreenPos.y;
+        _moveSelectedVerts(dx, dy);
+        editLastScreenPos.set(e.clientX, e.clientY);
+      }
+    }
+
+    function _onEditPointerUp(e) {
+      if (!editDragging) return;
+      editDragging = false;
+      editLastScreenPos = null;
+      if (editTool === 'move') canvasEl.style.cursor = 'grab';
+      try { canvasEl.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+
+    /** Return the set of vertex indices whose screen projection falls inside the brush. */
+    function _vertsInBrush(e) {
+      const result = new Set();
+      if (!headMesh || editMorphIdx === null) return result;
+
+      const rect = canvasEl.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const rSq = editBrushRadius * editBrushRadius;
+
+      const baseAttr = headMesh.geometry.attributes.position;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const count = baseAttr.count;
+
+      const mvp = new THREE.Matrix4()
+        .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+        .multiply(headMesh.matrixWorld);
+
+      const w = rect.width, h = rect.height;
+      const v4 = new THREE.Vector4();
+
+      for (let i = 0; i < count; i++) {
+        v4.set(
+          baseAttr.getX(i) + deltaAttr.getX(i),
+          baseAttr.getY(i) + deltaAttr.getY(i),
+          baseAttr.getZ(i) + deltaAttr.getZ(i),
+          1.0,
+        );
+        v4.applyMatrix4(mvp);
+        if (v4.w <= 0) continue;
+        const invW = 1.0 / v4.w;
+        const sx = (v4.x * invW + 1) * 0.5 * w;
+        const sy = (-v4.y * invW + 1) * 0.5 * h;
+        const dx = sx - mouseX;
+        const dy = sy - mouseY;
+        if (dx * dx + dy * dy <= rSq) result.add(i);
+      }
+      return result;
+    }
+
+    function _brushSelect(e, addToSelection) {
+      const inBrush = _vertsInBrush(e);
+      let changed = false;
+      for (const i of inBrush) {
+        if (addToSelection) {
+          if (!editSelectedVerts.has(i)) { editSelectedVerts.add(i); changed = true; }
+        } else {
+          if (editSelectedVerts.has(i)) { editSelectedVerts.delete(i); changed = true; }
+        }
+      }
+      // Clear hover during drag — the brush is actively selecting
+      editHoveredVerts = new Set();
+      if (changed) _updateEditPointColors();
+    }
+
+    function _moveSelectedVerts(dxPx, dyPx) {
+      if (editSelectedVerts.size === 0 || !headMesh) return;
+
+      // Average depth of selected vertices (camera space)
+      const baseAttr = headMesh.geometry.attributes.position;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const camInv = camera.matrixWorldInverse;
+      const meshWorld = headMesh.matrixWorld;
+      const combined = new THREE.Matrix4().multiplyMatrices(camInv, meshWorld);
+      const tmp = new THREE.Vector3();
+      let avgDepth = 0;
+
+      for (const i of editSelectedVerts) {
+        tmp.set(
+          baseAttr.getX(i) + deltaAttr.getX(i),
+          baseAttr.getY(i) + deltaAttr.getY(i),
+          baseAttr.getZ(i) + deltaAttr.getZ(i),
+        );
+        tmp.applyMatrix4(combined);
+        avgDepth += -tmp.z;
+      }
+      avgDepth /= editSelectedVerts.size;
+
+      // Convert pixel delta to world delta
+      const rect = canvasEl.getBoundingClientRect();
+      const fovRad = camera.fov * Math.PI / 180;
+      const pixelToWorld = 2 * avgDepth * Math.tan(fovRad / 2) / rect.height;
+
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+      const worldDelta = right.multiplyScalar(dxPx * pixelToWorld)
+        .add(up.multiplyScalar(-dyPx * pixelToWorld));
+
+      // Convert world delta to headMesh local space
+      const invMat = new THREE.Matrix4().copy(headMesh.matrixWorld).invert();
+      const localDelta = worldDelta.transformDirection(invMat);
+
+      // Apply delta to morph deltas for selected vertices
+      for (const i of editSelectedVerts) {
+        deltaAttr.setXYZ(i,
+          deltaAttr.getX(i) + localDelta.x,
+          deltaAttr.getY(i) + localDelta.y,
+          deltaAttr.getZ(i) + localDelta.z,
+        );
+      }
+      deltaAttr.needsUpdate = true;
+
+      // Update point positions to match
+      _updateEditPointPositions();
+    }
+
+    async function _saveCorrection() {
+      if (!headMesh || editMorphIdx === null || !editOriginalDeltas) return;
+
+      const baseAttr = headMesh.geometry.attributes.position;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const count = baseAttr.count;
+
+      const neutral = new Float32Array(count * 3);
+      const autoDeltas = new Float32Array(count * 3);
+      const correctedDeltas = new Float32Array(count * 3);
+
+      for (let i = 0; i < count; i++) {
+        const i3 = i * 3;
+        neutral[i3]     = baseAttr.getX(i);
+        neutral[i3 + 1] = baseAttr.getY(i);
+        neutral[i3 + 2] = baseAttr.getZ(i);
+
+        autoDeltas[i3]     = editOriginalDeltas[i3];
+        autoDeltas[i3 + 1] = editOriginalDeltas[i3 + 1];
+        autoDeltas[i3 + 2] = editOriginalDeltas[i3 + 2];
+
+        correctedDeltas[i3]     = deltaAttr.getX(i);
+        correctedDeltas[i3 + 1] = deltaAttr.getY(i);
+        correctedDeltas[i3 + 2] = deltaAttr.getZ(i);
+      }
+
+      // Send as binary ArrayBuffer for efficiency
+      const header = JSON.stringify({
+        blendshape_name: editMorphName,
+        rig_id: currentRigId || 'unknown',
+        vertex_count: count,
+      });
+      const headerBytes = new TextEncoder().encode(header);
+      const headerLen = headerBytes.length;
+      // Pad header to 4-byte alignment for Float32Array views
+      const paddedHeaderLen = Math.ceil((4 + headerLen) / 4) * 4;
+
+      // Pack: [4-byte header length][header JSON + padding][neutral][autoDeltas][correctedDeltas]
+      const totalSize = paddedHeaderLen + neutral.byteLength * 3;
+      const buf = new ArrayBuffer(totalSize);
+      new DataView(buf).setUint32(0, headerLen, true);
+      new Uint8Array(buf, 4, headerLen).set(headerBytes);
+      const floatOffset = paddedHeaderLen;
+      new Float32Array(buf, floatOffset, count * 3).set(neutral);
+      new Float32Array(buf, floatOffset + neutral.byteLength, count * 3).set(autoDeltas);
+      new Float32Array(buf, floatOffset + neutral.byteLength * 2, count * 3).set(correctedDeltas);
+
+      try {
+        const resp = await fetch('/save-correction', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: buf,
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          console.log('Correction saved:', data.file);
+        } else {
+          console.error('Failed to save correction:', resp.status);
+        }
+      } catch (err) {
+        console.error('Failed to save correction:', err);
+      }
     }
   </script>
 </body>
