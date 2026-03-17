@@ -187,6 +187,17 @@ async def validate_rig(rig_id: str) -> JSONResponse:
     return JSONResponse(json.loads(path.read_text()))
 
 
+@app.get("/rig-status/{rig_id}")
+async def rig_status(rig_id: str) -> JSONResponse:
+    """Lightweight status check: returns 'done' once the validation JSON exists."""
+    if not re.match(r"^[0-9a-f\-]+$", rig_id):
+        raise HTTPException(status_code=400, detail="Invalid rig_id.")
+    path = TMP_DIR / f"{rig_id}.validate.json"
+    if path.exists():
+        return JSONResponse({"status": "done", "rig_id": rig_id})
+    return JSONResponse({"status": "pending", "rig_id": rig_id})
+
+
 @app.post("/rig")
 async def rig(
     file: Optional[UploadFile] = File(None),
@@ -348,7 +359,8 @@ async def rig(
             "X-Rig-Pass": str(all_pass).lower(),
             "X-Rig-Score": f"{overall_score:.2f}",
             "X-Rig-Failures": failures_header,
-            "Access-Control-Expose-Headers": "X-Rig-Id, X-Rig-Pass, X-Rig-Score, X-Rig-Failures",
+            "X-Rig-Status": "done",
+            "Access-Control-Expose-Headers": "X-Rig-Id, X-Rig-Pass, X-Rig-Score, X-Rig-Failures, X-Rig-Status",
         },
         background=BackgroundTask(_delete_file, final_path),
     )

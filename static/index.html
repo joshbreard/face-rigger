@@ -858,9 +858,39 @@
           throw new Error(detail);
         }
 
-        const rigId = response.headers.get('X-Rig-Id');
-        const blob  = await response.blob();
+        // ── Headers are available immediately — read rig metadata ────
+        const rigId    = response.headers.get('X-Rig-Id');
+        const rigStatus = response.headers.get('X-Rig-Status');
+        const rigScore = response.headers.get('X-Rig-Score');
+
+        // Transition UI as soon as we know the rig is done (headers arrived).
+        if (rigStatus === 'done') {
+          spinnerLabel.textContent = 'Rig complete — downloading model…';
+        }
+
+        // Start polling as a fallback in case headers were delayed.
+        let pollTimer = null;
+        if (rigId && rigStatus !== 'done') {
+          pollTimer = setInterval(async () => {
+            try {
+              const st = await fetch(`/rig-status/${rigId}`);
+              if (!st.ok) return;
+              const stData = await st.json();
+              if (stData.status === 'done') {
+                clearInterval(pollTimer);
+                pollTimer = null;
+                spinnerLabel.textContent = 'Rig complete — downloading model…';
+              }
+            } catch (_) {}
+          }, 1000);
+        }
+
+        // ── Download body in parallel — UI already updated above ─────
+        const blob   = await response.blob();
         const glbUrl = URL.createObjectURL(blob);
+
+        // Stop polling if still running.
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 
         downloadBtn.href = glbUrl;
         card.classList.add('wide');
