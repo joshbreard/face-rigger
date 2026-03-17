@@ -14,3 +14,4 @@ pyglet<2
 # Optional: pip install kaolin from https://github.com/NVIDIAGameWorks/kaolin
 # If not installed, scipy Laplacian fallback is used automatically
 # kaolin  (commented out intentionally — install manually if GPU available)
+rtree==1.4.1

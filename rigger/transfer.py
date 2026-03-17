@@ -149,15 +149,6 @@ def _load_bs_skin() -> None:
 
     data = np.load(BS_SKIN_PATH, allow_pickle=True)
 
-    # Print all keys so the actual structure is visible in the server log.
-    print("=== bs_skin.npz structure ===", flush=True)
-    for key in data.files:
-        val = data[key]
-        shape = val.shape if hasattr(val, "shape") else "?"
-        dtype = val.dtype if hasattr(val, "dtype") else "?"
-        print(f"  {key!r:30s}  shape={shape}  dtype={dtype}", flush=True)
-    print("=============================", flush=True)
-
     # Neutral vertices (cm) → scale to metres, then centre at origin.
     if "neutral" not in data.files:
         raise KeyError(
@@ -239,7 +230,6 @@ def _load_bs_skin() -> None:
         )
 
 
-# Run at import so keys are printed during server startup.
 _load_bs_skin()
 
 
@@ -1267,6 +1257,16 @@ def _get_claire_region_mask() -> np.ndarray:
     return _claire_region_mask_cache
 
 
+_RBF_MAX_EVAL_VERTS: int = 3000
+"""Max target vertices to evaluate the RBF on directly.  Meshes above this
+threshold are decimated for the RBF solve, then results are up-sampled to
+the full vertex set via nearest-neighbour lookup."""
+
+_RBF_BATCH_TIMEOUT_S: float = 10.0
+"""Per-batch wall-clock timeout.  If a batch of blendshapes exceeds this,
+timed-out shapes fall back to IDW and a warning is logged."""
+
+
 def _pou_rbf_single_worker(
     args: tuple,
 ) -> tuple[str, np.ndarray]:
@@ -1274,15 +1274,25 @@ def _pou_rbf_single_worker(
 
     Accepts a tuple so it works with executor.map.  All numpy arrays are passed
     explicitly; module-level globals are not used (workers are separate processes).
+
+    When the target mesh exceeds *_RBF_MAX_EVAL_VERTS*, the RBF is evaluated on
+    a decimated proxy and the resulting displacements are up-sampled to the full
+    vertex set via nearest-neighbour lookup.
     """
     (name, claire_disp, regions, target_verts, face_region_mask,
-     claire_neutral, claire_mask, shepard_w) = args
+     claire_neutral, claire_mask, shepard_w,
+     decimated_verts, deci_to_full_idx) = args
 
+    import logging as _logging
     from scipy.interpolate import RBFInterpolator
     from scipy.spatial import KDTree
 
+    _log = _logging.getLogger(__name__)
+    t0 = time.time()
+
     N = len(target_verts)
     full_tree = KDTree(claire_neutral)
+    use_decimated = decimated_verts is not None
 
     def _idw(pts: np.ndarray) -> np.ndarray:
         k = min(4, len(claire_neutral))
@@ -1291,13 +1301,25 @@ def _pou_rbf_single_worker(
         w /= w.sum(axis=1, keepdims=True)
         return (claire_disp[idxs] * w[:, :, np.newaxis]).sum(axis=1)
 
+    def _idw_full() -> tuple[str, np.ndarray]:
+        """Full-mesh IDW fallback."""
+        return name, _idw(target_verts)
+
     # Global IDW for blendshapes spanning all regions
     if len(regions) >= 10:
-        return name, _idw(target_verts)
+        return _idw_full()
 
     target_disp = np.zeros((N, 3), dtype=np.float64)
 
     for r_idx in regions:
+        # --- timeout check at region granularity ---
+        if (time.time() - t0) > _RBF_BATCH_TIMEOUT_S:
+            _log.warning(
+                "POU-RBF timeout (%.0fs) on '%s' — falling back to IDW.",
+                _RBF_BATCH_TIMEOUT_S, name,
+            )
+            return _idw_full()
+
         tgt_r_idx = np.where(face_region_mask == r_idx)[0]
         if len(tgt_r_idx) == 0:
             continue
@@ -1311,7 +1333,18 @@ def _pou_rbf_single_worker(
 
         cp_pos = claire_neutral[claire_r_idx]
         cp_disp = claire_disp[claire_r_idx]
-        tgt_r_pos = target_verts[tgt_r_idx]
+
+        # ── Decide whether to evaluate on decimated proxy ──────────────
+        if use_decimated:
+            deci_r_idx = np.where(face_region_mask[deci_to_full_idx] == r_idx)[0]
+            if len(deci_r_idx) == 0:
+                # Decimation dropped all verts in this region — IDW fallback
+                r_disp = _idw(target_verts[tgt_r_idx])
+                target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
+                continue
+            eval_pos = decimated_verts[deci_r_idx]
+        else:
+            eval_pos = target_verts[tgt_r_idx]
 
         try:
             rbf = RBFInterpolator(
@@ -1320,9 +1353,19 @@ def _pou_rbf_single_worker(
                 degree=1,
                 smoothing=1e-3,
             )
-            r_disp = rbf(tgt_r_pos)
+            r_disp_eval = rbf(eval_pos)
         except Exception:
-            r_disp = _idw(tgt_r_pos)
+            r_disp = _idw(target_verts[tgt_r_idx])
+            target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
+            continue
+
+        # ── Up-sample from decimated proxy to full mesh via NN ─────────
+        if use_decimated:
+            deci_tree = KDTree(eval_pos)
+            _, nn_idx = deci_tree.query(target_verts[tgt_r_idx], k=1)
+            r_disp = r_disp_eval[nn_idx]
+        else:
+            r_disp = r_disp_eval
 
         target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
 
@@ -1376,6 +1419,19 @@ def transfer_morph_targets_pou_rbf(
 
     target_morph_targets: dict[str, np.ndarray] = {}
 
+    # ── Subsample target vertices for RBF evaluation if above threshold ──
+    decimated_verts: np.ndarray | None = None
+    deci_to_full_idx: np.ndarray | None = None
+    if N > _RBF_MAX_EVAL_VERTS:
+        # Uniform stride through vertex indices to get an evenly-spaced subset.
+        stride = max(1, N // _RBF_MAX_EVAL_VERTS)
+        deci_to_full_idx = np.arange(0, N, stride, dtype=np.intp)
+        decimated_verts = target_verts[deci_to_full_idx]
+        log.info(
+            "POU-RBF: subsampled %d → %d vertices for RBF evaluation (stride=%d).",
+            N, len(decimated_verts), stride,
+        )
+
     # Build per-blendshape args for parallel workers.
     claire_neutral_snap = claire_neutral_m  # local ref for closure safety
     worker_args = [
@@ -1388,20 +1444,85 @@ def transfer_morph_targets_pou_rbf(
             claire_neutral_snap,
             claire_mask,
             shepard_w,
+            decimated_verts,
+            deci_to_full_idx,
         )
         for name in ARKIT_BLENDSHAPES
     ]
 
     _BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 4))
+    n_batches = (len(worker_args) + _BATCH_SIZE - 1) // _BATCH_SIZE
     log.info(
-        "POU-RBF: dispatching 52 blendshapes in batches of %d (BATCH_SIZE=%d).",
-        _BATCH_SIZE, _BATCH_SIZE,
+        "POU-RBF: dispatching 52 blendshapes in %d batches of %d (BATCH_SIZE=%d).",
+        n_batches, _BATCH_SIZE, _BATCH_SIZE,
     )
+
+    def _idw_fallback(bs_name: str) -> tuple[str, np.ndarray]:
+        """Compute IDW k=4 transfer for a single blendshape (timeout fallback)."""
+        c_disp = _claire_deltas_m.get(
+            bs_name, np.zeros((V_claire, 3), dtype=np.float64),
+        )
+        k = min(4, len(claire_neutral_m))
+        dists, idxs = full_tree.query(target_verts, k=k)
+        w = 1.0 / (dists + 1e-12)
+        w /= w.sum(axis=1, keepdims=True)
+        disp = (c_disp[idxs] * w[:, :, np.newaxis]).sum(axis=1)
+        return bs_name, disp
+
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
     results: list[tuple[str, np.ndarray]] = []
     with ProcessPoolExecutor(max_workers=_BATCH_SIZE) as executor:
-        for batch_start in range(0, len(worker_args), _BATCH_SIZE):
+        for batch_idx, batch_start in enumerate(
+            range(0, len(worker_args), _BATCH_SIZE)
+        ):
             batch = worker_args[batch_start : batch_start + _BATCH_SIZE]
-            batch_results = list(executor.map(_pou_rbf_single_worker, batch))
+            batch_names = [a[0] for a in batch]
+            batch_num = batch_idx + 1
+
+            t_batch_start = time.time()
+            log.info(
+                "POU-RBF batch %d/%d start: %s",
+                batch_num, n_batches, batch_names,
+            )
+
+            futures = {
+                executor.submit(_pou_rbf_single_worker, args): args[0]
+                for args in batch
+            }
+
+            batch_results: list[tuple[str, np.ndarray]] = []
+            timed_out_names: list[str] = []
+
+            for fut in futures:
+                bs_name = futures[fut]
+                remaining = _RBF_BATCH_TIMEOUT_S - (time.time() - t_batch_start)
+                try:
+                    result = fut.result(timeout=max(0.0, remaining))
+                    batch_results.append(result)
+                except FuturesTimeoutError:
+                    timed_out_names.append(bs_name)
+                    fut.cancel()
+
+            t_batch_elapsed = time.time() - t_batch_start
+
+            # IDW fallback for any blendshapes that timed out.
+            if timed_out_names:
+                log.warning(
+                    "POU-RBF batch %d/%d: %d blendshape(s) timed out after %.1fs, "
+                    "falling back to IDW: %s",
+                    batch_num, n_batches, len(timed_out_names),
+                    t_batch_elapsed, timed_out_names,
+                )
+                for bs_name in timed_out_names:
+                    batch_results.append(_idw_fallback(bs_name))
+
+            log.info(
+                "POU-RBF batch %d/%d done: %.2fs (%d ok, %d idw-fallback)",
+                batch_num, n_batches, t_batch_elapsed,
+                len(batch_results) - len(timed_out_names), len(timed_out_names),
+            )
+
             results.extend(batch_results)
             if batch_start + _BATCH_SIZE < len(worker_args):
                 time.sleep(0.1)
