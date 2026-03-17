@@ -528,6 +528,26 @@ async def save_correction(request: Request):
     return JSONResponse({"status": "ok", "file": filename, "vertex_count": vertex_count})
 
 
+@app.post("/save-correction-json")
+async def save_correction_json(request: Request):
+    """Save a blendshape correction as JSON (sparse vertex deltas)."""
+    data = await request.json()
+    bs_name = data.get("blendshape_name", "unknown")
+    mesh_id = data.get("mesh_id", "mesh0")
+
+    corrections_dir = Path("corrections")
+    corrections_dir.mkdir(exist_ok=True)
+
+    filename = f"{bs_name}_{mesh_id}.json"
+    filepath = corrections_dir / filename
+
+    with open(filepath, "w") as f:
+        json.dump(data, f)
+
+    log.info("Saved correction JSON: %s  (blendshape=%s, mesh=%s)", filename, bs_name, mesh_id)
+    return JSONResponse({"status": "ok", "file": filename})
+
+
 def _delete_file(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)

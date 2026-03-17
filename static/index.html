@@ -1050,6 +1050,7 @@
     let editMorphIdx = null;
     let editMorphName = null;
     let editPointsMesh = null;
+    let editOccluderMesh = null;  // invisible clone for brush occlusion raycasts
     let editOriginalDeltas = null;
     let editSelectedVerts = new Set();
     let editAffectedSet = new Set();
@@ -1060,6 +1061,16 @@
     let editBrushRadius = 20;
     let editDragging = false;
     let editLastScreenPos = null;
+    let editDragStartPos = null;       // Bug 2: drag threshold origin
+    let editDragStarted = false;       // Bug 2: true once threshold exceeded
+    let editOrigVertPositions = null;  // Bug 3: original positions at drag start
+    let editHeadVerts = null;          // Set of vertex indices in head bounding box
+    let editOccluderTris = null;       // Float32Array of morphed triangle positions for worker
+    let brushUpdatePending = false;    // RAF throttle flag
+    let brushPendingEvent = null;      // latest pointer event data for RAF
+    let brushPendingDrag = false;      // whether the pending update is a drag action
+    let brushPendingAddToSel = true;   // selection mode for pending drag
+    let occlusionWorker = null;        // Web Worker for heavy occlusion tests
 
     const editToolbar      = document.getElementById('edit-toolbar');
     const editBsName       = document.getElementById('edit-bs-name');
@@ -1893,13 +1904,15 @@
       // Camera sits directly in front at 1.7× head-height distance.
       const camDist = headHeight * 1.7;
       camera.position.set(orbitTarget.x, orbitTarget.y, orbitTarget.z + camDist);
-      camera.near = sceneDim * 0.001;
+      camera.near = 0.01;
       camera.far  = sceneDim * 60;
       camera.updateProjectionMatrix();
 
       controls.target.copy(orbitTarget);
-      controls.minDistance = headHeight * 0.3;
-      controls.maxDistance = sceneDim  * 4.0;
+      controls.minDistance = 0.1;
+      controls.maxDistance = 20;
+      controls.enableZoom = true;
+      controls.zoomSpeed = 1.5;
       controls.update();
 
       // ── Reposition key light relative to face center ─────────────────
@@ -2100,7 +2113,7 @@
       const activeSlider = morphList.querySelector('.morph-row[data-idx="' + idx + '"] .morph-slider');
       if (activeSlider) activeSlider.value = 1;
 
-      // ── Make mesh semi-transparent so face shape is still visible ──
+      // ── Make mesh fully opaque so it occludes back-face vertices ──
       editOriginalMaterials = [];
       const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
       for (const mat of mats) {
@@ -2109,12 +2122,29 @@
           transparent: mat.transparent,
           opacity: mat.opacity,
           depthWrite: mat.depthWrite,
+          depthTest: mat.depthTest,
         });
-        mat.transparent = true;
-        mat.opacity = 0.3;
-        mat.depthWrite = false;
+        mat.transparent = false;
+        mat.opacity = 1.0;
+        mat.depthWrite = true;
+        mat.depthTest = true;
         mat.needsUpdate = true;
       }
+
+      // ── Create invisible occluder mesh for brush depth-testing ──
+      // Clone geometry so it has its own morph state; use invisible material.
+      const occluderMat = new THREE.MeshBasicMaterial({
+        visible: false, side: THREE.FrontSide,
+      });
+      editOccluderMesh = new THREE.Mesh(headMesh.geometry, occluderMat);
+      editOccluderMesh.morphTargetDictionary = headMesh.morphTargetDictionary;
+      editOccluderMesh.morphTargetInfluences = headMesh.morphTargetInfluences;
+      // Match the headMesh world transform so raycasts align
+      headMesh.parent.add(editOccluderMesh);
+      editOccluderMesh.position.copy(headMesh.position);
+      editOccluderMesh.rotation.copy(headMesh.rotation);
+      editOccluderMesh.scale.copy(headMesh.scale);
+      editOccluderMesh.updateMatrixWorld(true);
 
       // Determine affected vertices
       editAffectedSet = new Set();
@@ -2136,6 +2166,21 @@
       // Expand 15% so "All" grabs a generous head region
       const bboxPad = editHeadBBox.getSize(new THREE.Vector3()).multiplyScalar(0.15);
       editHeadBBox.expandByVector(bboxPad);
+
+      // ── Pre-compute head vertex index set (vertices within head bbox) ──
+      editHeadVerts = new Set();
+      for (let i = 0; i < vertCount; i++) {
+        tmpV.set(baseAttr.getX(i), baseAttr.getY(i), baseAttr.getZ(i));
+        if (editHeadBBox.containsPoint(tmpV)) {
+          editHeadVerts.add(i);
+        }
+      }
+
+      // ── Pre-compute morphed triangle positions for occlusion worker ──
+      _buildOccluderTriangles();
+
+      // ── Create occlusion Web Worker ──
+      _initOcclusionWorker();
 
       // ── Create Points overlay with per-vertex size + color ──
       const positions = new Float32Array(vertCount * 3);
@@ -2234,12 +2279,31 @@
           newDeltas[i * 3 + 1] = deltaAttr.getY(i);
           newDeltas[i * 3 + 2] = deltaAttr.getZ(i);
         }
-        headMesh.geometry.morphAttributes.position[editMorphIdx] =
-          new THREE.Float32BufferAttribute(newDeltas, 3);
-        headMesh.geometry.attributes.position.needsUpdate = true;
 
-        // Save correction to backend
+        // Replace the old morph target completely (not layer on top)
+        const newAttr = new THREE.Float32BufferAttribute(newDeltas, 3);
+        // Snapshot morph target names before patching (updateMorphTargets would nuke them)
+        const morphNames = Object.keys(headMesh.morphTargetDictionary);
+        headMesh.geometry.morphAttributes.position[editMorphIdx] = newAttr;
+        headMesh.geometry.attributes.position.needsUpdate = true;
+        // Rebuild morphTargetDictionary from snapshot — do NOT call updateMorphTargets()
+        morphNames.forEach((name, i) => { headMesh.morphTargetDictionary[name] = i; });
+
+        // Reset influence so mesh returns to neutral pose
+        headMesh.morphTargetInfluences[editMorphIdx] = 0;
+
+        // Save correction to backend (binary)
         await _saveCorrection();
+
+        // Also write correction JSON locally
+        await _saveCorrectionJSON(newDeltas, count);
+      }
+
+      // ── Dispose occluder mesh ──
+      if (editOccluderMesh) {
+        if (editOccluderMesh.parent) editOccluderMesh.parent.remove(editOccluderMesh);
+        editOccluderMesh.material.dispose();
+        editOccluderMesh = null;
       }
 
       // ── Dispose points overlay ──
@@ -2250,11 +2314,12 @@
         editPointsMesh = null;
       }
 
-      // ── Restore original mesh material (full opacity) ──
+      // ── Restore original mesh material ──
       for (const saved of editOriginalMaterials) {
         saved.ref.transparent = saved.transparent;
         saved.ref.opacity     = saved.opacity;
         saved.ref.depthWrite  = saved.depthWrite;
+        saved.ref.depthTest   = saved.depthTest;
         saved.ref.needsUpdate = true;
       }
       editOriginalMaterials = [];
@@ -2301,6 +2366,11 @@
       editAffectedSet = new Set();
       editHoveredVerts = new Set();
       editHeadBBox = null;
+      editHeadVerts = null;
+      editOccluderTris = null;
+      brushUpdatePending = false;
+      brushPendingEvent = null;
+      if (occlusionWorker) { occlusionWorker.terminate(); occlusionWorker = null; }
     }
 
     function _updateEditPointColors() {
@@ -2310,12 +2380,16 @@
       const count    = colAttr.count;
       for (let i = 0; i < count; i++) {
         if (editSelectedVerts.has(i)) {
-          // Bright blue #4488ff
+          // Bright blue #4488ff for active selection
           colAttr.setXYZ(i, 0.267, 0.533, 1.0);
           sizeAttr.setX(i, 4.0);
         } else if (editHoveredVerts.has(i)) {
           // Yellow hover #ffcc00
           colAttr.setXYZ(i, 1.0, 0.8, 0.0);
+          sizeAttr.setX(i, 3.0);
+        } else if (editAffectedSet.has(i)) {
+          // Bright orange #ff6600 for already-edited vertices
+          colAttr.setXYZ(i, 1.0, 0.4, 0.0);
           sizeAttr.setX(i, 3.0);
         } else {
           // Light gray
@@ -2349,14 +2423,23 @@
 
       e.preventDefault();
       editDragging = true;
+      editDragStarted = false;
+      editDragStartPos = new THREE.Vector2(e.clientX, e.clientY);
       editLastScreenPos = new THREE.Vector2(e.clientX, e.clientY);
       canvasEl.setPointerCapture(e.pointerId);
 
       if (editTool === 'select') {
-        _brushSelect(e, !e.shiftKey);
-      } else if (editTool === 'move') {
-        canvasEl.style.cursor = 'grabbing';
+        editDragStarted = true;  // select starts immediately
+        // Trigger brush select through the throttled RAF path
+        brushPendingEvent = { clientX: e.clientX, clientY: e.clientY };
+        brushPendingDrag = true;
+        brushPendingAddToSel = !e.shiftKey;
+        if (!brushUpdatePending) {
+          brushUpdatePending = true;
+          requestAnimationFrame(_executeBrushUpdate);
+        }
       }
+      // Move mode: do NOT start drag or change cursor/colors until threshold exceeded
     }
 
     function _onEditPointerMove(e) {
@@ -2364,37 +2447,127 @@
 
       if (editTool === 'select') {
         _updateBrushCursor(e);
-        // Hover highlight when not actively dragging
-        if (!editDragging) {
-          editHoveredVerts = _vertsInBrush(e);
-          _updateEditPointColors();
+        // Schedule throttled brush update via RAF
+        brushPendingEvent = { clientX: e.clientX, clientY: e.clientY };
+        brushPendingDrag = editDragging;
+        brushPendingAddToSel = !e.shiftKey;
+        if (!brushUpdatePending) {
+          brushUpdatePending = true;
+          requestAnimationFrame(_executeBrushUpdate);
         }
+        return;
       }
 
       if (!editDragging) return;
 
-      if (editTool === 'select') {
-        _brushSelect(e, !e.shiftKey);
-      } else if (editTool === 'move' && editSelectedVerts.size > 0) {
-        const dx = e.clientX - editLastScreenPos.x;
-        const dy = e.clientY - editLastScreenPos.y;
+      if (editTool === 'move' && editSelectedVerts.size > 0) {
+        // Bug 2: drag threshold — only start after 3px movement
+        if (!editDragStarted) {
+          const tdx = e.clientX - editDragStartPos.x;
+          const tdy = e.clientY - editDragStartPos.y;
+          if (Math.sqrt(tdx * tdx + tdy * tdy) < 3) return;
+          editDragStarted = true;
+          canvasEl.style.cursor = 'grabbing';
+          // Bug 3: snapshot original delta positions at drag start
+          const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+          editOrigVertPositions = new Map();
+          for (const i of editSelectedVerts) {
+            editOrigVertPositions.set(i, new THREE.Vector3(
+              deltaAttr.getX(i), deltaAttr.getY(i), deltaAttr.getZ(i)
+            ));
+          }
+        }
+        // Bug 3: compute total delta from drag start, apply to original positions
+        const dx = e.clientX - editDragStartPos.x;
+        const dy = e.clientY - editDragStartPos.y;
         _moveSelectedVerts(dx, dy);
-        editLastScreenPos.set(e.clientX, e.clientY);
+      }
+    }
+
+    function _executeBrushUpdate() {
+      brushUpdatePending = false;
+      if (!editMode || !brushPendingEvent) return;
+      const ev = brushPendingEvent;
+      const isDrag = brushPendingDrag;
+      const addToSel = brushPendingAddToSel;
+      brushPendingEvent = null;
+
+      // Get 2D screen-space candidates (cheap)
+      const candidates = _screenSpaceCandidates(ev);
+
+      if (candidates.length === 0) {
+        editHoveredVerts = new Set();
+        _updateEditPointColors();
+        return;
+      }
+
+      if (candidates.length <= 100) {
+        // Occlusion test on main thread — fast enough for <100 candidates
+        const visible = _occlusionTestSync(candidates);
+        if (isDrag) {
+          _applyBrushSelect(visible, addToSel);
+        } else {
+          editHoveredVerts = visible;
+          _updateEditPointColors();
+        }
+      } else if (occlusionWorker) {
+        // Offload to Web Worker
+        const camPos = camera.position;
+        const candData = new Float32Array(candidates.length * 4);
+        for (let i = 0; i < candidates.length; i++) {
+          candData[i * 4]     = candidates[i].idx;
+          candData[i * 4 + 1] = candidates[i].worldPos.x;
+          candData[i * 4 + 2] = candidates[i].worldPos.y;
+          candData[i * 4 + 3] = candidates[i].worldPos.z;
+        }
+        occlusionWorker.postMessage({
+          candData: candData.buffer,
+          camPos: [camPos.x, camPos.y, camPos.z],
+          isDrag,
+          addToSel,
+        }, [candData.buffer]);
+      } else {
+        // Fallback: main thread
+        const visible = _occlusionTestSync(candidates);
+        if (isDrag) {
+          _applyBrushSelect(visible, addToSel);
+        } else {
+          editHoveredVerts = visible;
+          _updateEditPointColors();
+        }
       }
     }
 
     function _onEditPointerUp(e) {
       if (!editDragging) return;
+      const wasMoveToolDrag = editTool === 'move' && editDragStarted && editSelectedVerts.size > 0;
       editDragging = false;
+      editDragStarted = false;
+      editDragStartPos = null;
       editLastScreenPos = null;
+      editOrigVertPositions = null;
       if (editTool === 'move') canvasEl.style.cursor = 'grab';
       try { canvasEl.releasePointerCapture(e.pointerId); } catch (_) {}
+
+      if (wasMoveToolDrag && editPointsMesh) {
+        // Track which vertices have been displaced
+        const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+        for (const i of editSelectedVerts) {
+          if (deltaAttr.getX(i) !== 0 || deltaAttr.getY(i) !== 0 || deltaAttr.getZ(i) !== 0) {
+            editAffectedSet.add(i);
+          }
+        }
+        // Refresh point positions and colors to reflect post-move state
+        _updateEditPointPositions();
+        _updateEditPointColors();
+        editPointsMesh.visible = true;
+      }
     }
 
-    /** Return the set of vertex indices whose screen projection falls inside the brush. */
-    function _vertsInBrush(e) {
-      const result = new Set();
-      if (!headMesh || editMorphIdx === null) return result;
+    /** Return candidate vertices whose screen projection falls inside the brush.
+     *  Only checks head vertices (pre-computed set). Returns array of {idx, worldPos}. */
+    function _screenSpaceCandidates(e) {
+      if (!headMesh || editMorphIdx === null) return [];
 
       const rect = canvasEl.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
@@ -2403,7 +2576,6 @@
 
       const baseAttr = headMesh.geometry.attributes.position;
       const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
-      const count = baseAttr.count;
 
       const mvp = new THREE.Matrix4()
         .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
@@ -2411,8 +2583,13 @@
 
       const w = rect.width, h = rect.height;
       const v4 = new THREE.Vector4();
+      const candidates = [];
+      const meshWorld = headMesh.matrixWorld;
+      const localPos = new THREE.Vector3();
 
-      for (let i = 0; i < count; i++) {
+      // Only iterate head vertices, not the full mesh
+      const vertexSet = editHeadVerts || new Set();
+      for (const i of vertexSet) {
         v4.set(
           baseAttr.getX(i) + deltaAttr.getX(i),
           baseAttr.getY(i) + deltaAttr.getY(i),
@@ -2426,30 +2603,168 @@
         const sy = (-v4.y * invW + 1) * 0.5 * h;
         const dx = sx - mouseX;
         const dy = sy - mouseY;
-        if (dx * dx + dy * dy <= rSq) result.add(i);
+        if (dx * dx + dy * dy <= rSq) {
+          localPos.set(
+            baseAttr.getX(i) + deltaAttr.getX(i),
+            baseAttr.getY(i) + deltaAttr.getY(i),
+            baseAttr.getZ(i) + deltaAttr.getZ(i),
+          );
+          const wp = localPos.clone().applyMatrix4(meshWorld);
+          candidates.push({ idx: i, worldPos: wp });
+        }
+      }
+      return candidates;
+    }
+
+    /** Synchronous occlusion test for small candidate sets. Returns Set of visible vertex indices. */
+    function _occlusionTestSync(candidates) {
+      const result = new Set();
+      if (candidates.length === 0) return result;
+
+      const occluder = editOccluderMesh || headMesh;
+      const rc = new THREE.Raycaster();
+      const camPos = camera.position;
+      const EPSILON = 0.01;
+
+      for (const c of candidates) {
+        const dir = c.worldPos.clone().sub(camPos).normalize();
+        const vertDist = c.worldPos.distanceTo(camPos);
+        rc.set(camPos, dir);
+        rc.far = vertDist + EPSILON;
+        const hits = rc.intersectObject(occluder, false);
+        if (hits.length === 0 || hits[0].distance >= vertDist - EPSILON) {
+          result.add(c.idx);
+        }
       }
       return result;
     }
 
-    function _brushSelect(e, addToSelection) {
-      const inBrush = _vertsInBrush(e);
+    /** Apply brush selection from a set of visible vertex indices. */
+    function _applyBrushSelect(visible, addToSelection) {
       let changed = false;
-      for (const i of inBrush) {
+      for (const i of visible) {
         if (addToSelection) {
           if (!editSelectedVerts.has(i)) { editSelectedVerts.add(i); changed = true; }
         } else {
           if (editSelectedVerts.has(i)) { editSelectedVerts.delete(i); changed = true; }
         }
       }
-      // Clear hover during drag — the brush is actively selecting
       editHoveredVerts = new Set();
       if (changed) _updateEditPointColors();
     }
 
-    function _moveSelectedVerts(dxPx, dyPx) {
-      if (editSelectedVerts.size === 0 || !headMesh) return;
+    /** Build flat Float32Array of morphed triangle vertex positions for the occlusion worker. */
+    function _buildOccluderTriangles() {
+      if (!headMesh) return;
+      const geo = headMesh.geometry;
+      const baseAttr = geo.attributes.position;
+      const deltaAttr = geo.morphAttributes.position[editMorphIdx];
+      const index = geo.index;
+      const meshWorld = headMesh.matrixWorld;
+      const tmp = new THREE.Vector3();
 
-      // Average depth of selected vertices (camera space)
+      const faceCount = index ? index.count / 3 : baseAttr.count / 3;
+      editOccluderTris = new Float32Array(faceCount * 9);
+
+      for (let f = 0; f < faceCount; f++) {
+        for (let v = 0; v < 3; v++) {
+          const vi = index ? index.getX(f * 3 + v) : f * 3 + v;
+          tmp.set(
+            baseAttr.getX(vi) + deltaAttr.getX(vi),
+            baseAttr.getY(vi) + deltaAttr.getY(vi),
+            baseAttr.getZ(vi) + deltaAttr.getZ(vi),
+          );
+          tmp.applyMatrix4(meshWorld);
+          const off = f * 9 + v * 3;
+          editOccluderTris[off]     = tmp.x;
+          editOccluderTris[off + 1] = tmp.y;
+          editOccluderTris[off + 2] = tmp.z;
+        }
+      }
+    }
+
+    /** Initialize the occlusion Web Worker with inline code. */
+    function _initOcclusionWorker() {
+      const src = `
+        let tris = null;
+        let triCount = 0;
+
+        self.onmessage = function(msg) {
+          const d = msg.data;
+
+          // Init message: store triangle data once
+          if (d.type === 'init') {
+            tris = new Float32Array(d.triangles);
+            triCount = d.triCount;
+            return;
+          }
+
+          // Test message: run occlusion against stored triangles
+          const cand = new Float32Array(d.candData);
+          const camX = d.camPos[0], camY = d.camPos[1], camZ = d.camPos[2];
+          const EPSILON = 0.01;
+          const visible = [];
+
+          for (let ci = 0; ci < cand.length; ci += 4) {
+            const idx = cand[ci];
+            const wx = cand[ci+1], wy = cand[ci+2], wz = cand[ci+3];
+            const dirX = wx - camX, dirY = wy - camY, dirZ = wz - camZ;
+            const vertDist = Math.sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ);
+            const invDist = 1.0 / vertDist;
+            const dx = dirX * invDist, dy = dirY * invDist, dz = dirZ * invDist;
+            let blocked = false;
+
+            for (let t = 0; t < triCount; t++) {
+              const ti = t * 9;
+              const v0x = tris[ti], v0y = tris[ti+1], v0z = tris[ti+2];
+              const e1x = tris[ti+3]-v0x, e1y = tris[ti+4]-v0y, e1z = tris[ti+5]-v0z;
+              const e2x = tris[ti+6]-v0x, e2y = tris[ti+7]-v0y, e2z = tris[ti+8]-v0z;
+              const px = dy*e2z - dz*e2y, py = dz*e2x - dx*e2z, pz = dx*e2y - dy*e2x;
+              const det = e1x*px + e1y*py + e1z*pz;
+              if (det > -1e-8 && det < 1e-8) continue;
+              const invDet = 1.0 / det;
+              const tx = camX-v0x, ty = camY-v0y, tz = camZ-v0z;
+              const u = (tx*px + ty*py + tz*pz) * invDet;
+              if (u < 0 || u > 1) continue;
+              const qx = ty*e1z - tz*e1y, qy = tz*e1x - tx*e1z, qz = tx*e1y - ty*e1x;
+              const v = (dx*qx + dy*qy + dz*qz) * invDet;
+              if (v < 0 || u + v > 1) continue;
+              const hitT = (e2x*qx + e2y*qy + e2z*qz) * invDet;
+              if (hitT > 1e-8 && hitT < vertDist - EPSILON) { blocked = true; break; }
+            }
+            if (!blocked) visible.push(idx);
+          }
+
+          self.postMessage({ visible, isDrag: d.isDrag, addToSel: d.addToSel });
+        };
+      `;
+      const blob = new Blob([src], { type: 'application/javascript' });
+      occlusionWorker = new Worker(URL.createObjectURL(blob));
+
+      // Send triangle data once at init (transferred, not copied)
+      const triCopy = editOccluderTris.slice();
+      occlusionWorker.postMessage({
+        type: 'init',
+        triangles: triCopy.buffer,
+        triCount: triCopy.length / 9,
+      }, [triCopy.buffer]);
+
+      occlusionWorker.onmessage = function(msg) {
+        const { visible, isDrag, addToSel } = msg.data;
+        const visSet = new Set(visible.map(v => Math.round(v)));
+        if (isDrag) {
+          _applyBrushSelect(visSet, addToSel);
+        } else {
+          editHoveredVerts = visSet;
+          _updateEditPointColors();
+        }
+      };
+    }
+
+    function _moveSelectedVerts(dxPx, dyPx) {
+      if (editSelectedVerts.size === 0 || !headMesh || !editOrigVertPositions) return;
+
+      // Average depth of selected vertices (camera space) using original positions
       const baseAttr = headMesh.geometry.attributes.position;
       const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
       const camInv = camera.matrixWorldInverse;
@@ -2459,17 +2774,18 @@
       let avgDepth = 0;
 
       for (const i of editSelectedVerts) {
+        const orig = editOrigVertPositions.get(i);
         tmp.set(
-          baseAttr.getX(i) + deltaAttr.getX(i),
-          baseAttr.getY(i) + deltaAttr.getY(i),
-          baseAttr.getZ(i) + deltaAttr.getZ(i),
+          baseAttr.getX(i) + orig.x,
+          baseAttr.getY(i) + orig.y,
+          baseAttr.getZ(i) + orig.z,
         );
         tmp.applyMatrix4(combined);
         avgDepth += -tmp.z;
       }
       avgDepth /= editSelectedVerts.size;
 
-      // Convert pixel delta to world delta
+      // Convert total pixel delta from drag start to world delta
       const rect = canvasEl.getBoundingClientRect();
       const fovRad = camera.fov * Math.PI / 180;
       const pixelToWorld = 2 * avgDepth * Math.tan(fovRad / 2) / rect.height;
@@ -2483,18 +2799,28 @@
       const invMat = new THREE.Matrix4().copy(headMesh.matrixWorld).invert();
       const localDelta = worldDelta.transformDirection(invMat);
 
-      // Apply delta to morph deltas for selected vertices
+      // Apply total delta to ORIGINAL positions (not accumulated) to prevent drift
       for (const i of editSelectedVerts) {
+        const orig = editOrigVertPositions.get(i);
         deltaAttr.setXYZ(i,
-          deltaAttr.getX(i) + localDelta.x,
-          deltaAttr.getY(i) + localDelta.y,
-          deltaAttr.getZ(i) + localDelta.z,
+          orig.x + localDelta.x,
+          orig.y + localDelta.y,
+          orig.z + localDelta.z,
         );
       }
       deltaAttr.needsUpdate = true;
 
-      // Update point positions to match
+      // Update point overlay and show moved verts as orange
       _updateEditPointPositions();
+      const colAttr = editPointsMesh.geometry.attributes.aColor;
+      const sizeAttr = editPointsMesh.geometry.attributes.aSize;
+      for (const i of editSelectedVerts) {
+        // Orange #ff6600 while dragging
+        colAttr.setXYZ(i, 1.0, 0.4, 0.0);
+        sizeAttr.setX(i, 4.0);
+      }
+      colAttr.needsUpdate = true;
+      sizeAttr.needsUpdate = true;
     }
 
     async function _saveCorrection() {
@@ -2558,6 +2884,50 @@
         }
       } catch (err) {
         console.error('Failed to save correction:', err);
+      }
+    }
+    async function _saveCorrectionJSON(correctedDeltas, vertexCount) {
+      if (!editMorphName) return;
+      const meshId = headMesh.name || headMesh.uuid || 'mesh0';
+
+      // Build sparse delta map: only vertices that differ from original
+      const corrections = {};
+      for (let i = 0; i < vertexCount; i++) {
+        const i3 = i * 3;
+        const dx = correctedDeltas[i3]     - editOriginalDeltas[i3];
+        const dy = correctedDeltas[i3 + 1] - editOriginalDeltas[i3 + 1];
+        const dz = correctedDeltas[i3 + 2] - editOriginalDeltas[i3 + 2];
+        if (Math.abs(dx) > 1e-7 || Math.abs(dy) > 1e-7 || Math.abs(dz) > 1e-7) {
+          corrections[i] = [
+            correctedDeltas[i3],
+            correctedDeltas[i3 + 1],
+            correctedDeltas[i3 + 2],
+          ];
+        }
+      }
+
+      const payload = {
+        blendshape_name: editMorphName,
+        mesh_id: meshId,
+        rig_id: currentRigId || 'unknown',
+        vertex_count: vertexCount,
+        corrected_vertices: corrections,
+      };
+
+      try {
+        const resp = await fetch('/save-correction-json', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          console.log('Correction JSON saved:', data.file);
+        } else {
+          console.error('Failed to save correction JSON:', resp.status);
+        }
+      } catch (err) {
+        console.error('Failed to save correction JSON:', err);
       }
     }
   </script>
