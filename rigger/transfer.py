@@ -18,6 +18,8 @@ subtraction of neutral is needed.
 """
 
 import logging
+import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -1231,7 +1233,13 @@ for _bs_name in ARKIT_BLENDSHAPES:
         _BLENDSHAPE_REGIONS[_bs_name] = list(range(10))
 
 # Shepard boundary-blend radius (metres).
-_POU_REGION_RADIUS_M: float = 0.030  # 30 mm
+_POU_REGION_RADIUS_M: float = 0.065  # 65 mm
+
+# Per-region expansion biases for Claire's mask (mirrors landmarks._REGION_EXPANSION_M).
+_CLAIRE_REGION_EXPANSION_M: np.ndarray = np.array(
+    [0.065, 0.065, 0.040, 0.055, 0.040, 0.040, 0.060, 0.055, 0.055, 0.070],
+    dtype=np.float64,
+)
 
 # Cached Claire per-vertex region mask — computed lazily on first POU-RBF call.
 _claire_region_mask_cache: np.ndarray | None = None
@@ -1249,12 +1257,75 @@ def _get_claire_region_mask() -> np.ndarray:
         claire_neutral_m[:, np.newaxis, :] - anchors[np.newaxis, :, :],
         axis=2,
     )  # (V_claire, 10)
-    _claire_region_mask_cache = np.argmin(dists, axis=1).astype(np.int32)
+    adjusted = dists - _CLAIRE_REGION_EXPANSION_M[np.newaxis, :]
+    _claire_region_mask_cache = np.argmin(adjusted, axis=1).astype(np.int32)
     log.info(
         "Claire region mask: %s",
         {i: int((_claire_region_mask_cache == i).sum()) for i in range(10)},
     )
     return _claire_region_mask_cache
+
+
+def _pou_rbf_single_worker(
+    args: tuple,
+) -> tuple[str, np.ndarray]:
+    """ProcessPoolExecutor worker: transfer one blendshape via POU-RBF.
+
+    Accepts a tuple so it works with executor.map.  All numpy arrays are passed
+    explicitly; module-level globals are not used (workers are separate processes).
+    """
+    (name, claire_disp, regions, target_verts, face_region_mask,
+     claire_neutral, claire_mask, shepard_w) = args
+
+    from scipy.interpolate import RBFInterpolator
+    from scipy.spatial import KDTree
+
+    N = len(target_verts)
+    full_tree = KDTree(claire_neutral)
+
+    def _idw(pts: np.ndarray) -> np.ndarray:
+        k = min(4, len(claire_neutral))
+        dists, idxs = full_tree.query(pts, k=k)
+        w = 1.0 / (dists + 1e-12)
+        w /= w.sum(axis=1, keepdims=True)
+        return (claire_disp[idxs] * w[:, :, np.newaxis]).sum(axis=1)
+
+    # Global IDW for blendshapes spanning all regions
+    if len(regions) >= 10:
+        return name, _idw(target_verts)
+
+    target_disp = np.zeros((N, 3), dtype=np.float64)
+
+    for r_idx in regions:
+        tgt_r_idx = np.where(face_region_mask == r_idx)[0]
+        if len(tgt_r_idx) == 0:
+            continue
+
+        claire_r_idx = np.where(claire_mask == r_idx)[0]
+
+        if len(claire_r_idx) < 4:
+            r_disp = _idw(target_verts[tgt_r_idx])
+            target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
+            continue
+
+        cp_pos = claire_neutral[claire_r_idx]
+        cp_disp = claire_disp[claire_r_idx]
+        tgt_r_pos = target_verts[tgt_r_idx]
+
+        try:
+            rbf = RBFInterpolator(
+                cp_pos, cp_disp,
+                kernel="thin_plate_spline",
+                degree=1,
+                smoothing=1e-3,
+            )
+            r_disp = rbf(tgt_r_pos)
+        except Exception:
+            r_disp = _idw(tgt_r_pos)
+
+        target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
+
+    return name, target_disp
 
 
 def transfer_morph_targets_pou_rbf(
@@ -1304,64 +1375,42 @@ def transfer_morph_targets_pou_rbf(
 
     target_morph_targets: dict[str, np.ndarray] = {}
 
-    for name in ARKIT_BLENDSHAPES:
-        claire_disp = _claire_deltas_m.get(name, np.zeros((V_claire, 3), dtype=np.float64))
-        regions = _BLENDSHAPE_REGIONS.get(name, list(range(10)))
+    # Build per-blendshape args for parallel workers.
+    claire_neutral_snap = claire_neutral_m  # local ref for closure safety
+    worker_args = [
+        (
+            name,
+            _claire_deltas_m.get(name, np.zeros((V_claire, 3), dtype=np.float64)),
+            _BLENDSHAPE_REGIONS.get(name, list(range(10))),
+            target_verts,
+            face_region_mask,
+            claire_neutral_snap,
+            claire_mask,
+            shepard_w,
+        )
+        for name in ARKIT_BLENDSHAPES
+    ]
 
-        # Blendshapes that affect all regions → global IDW (no localization benefit)
-        if len(regions) >= 10:
-            target_disp = _transfer_idw(target_verts, claire_disp, full_tree, k=4)
-            target_morph_targets[name] = target_disp
-            continue
+    log.info("POU-RBF: dispatching 52 blendshapes to ProcessPoolExecutor (workers=%d).",
+             os.cpu_count())
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        results = list(executor.map(_pou_rbf_single_worker, worker_args))
 
-        target_disp = np.zeros((N, 3), dtype=np.float64)
-
-        for r_idx in regions:
-            tgt_r_idx = np.where(face_region_mask == r_idx)[0]
-            if len(tgt_r_idx) == 0:
-                continue
-
-            # Claire control points: this region + slight expansion
-            claire_r_idx = np.where(claire_mask == r_idx)[0]
-
-            if len(claire_r_idx) < 4:
-                # Too few Claire CPs → IDW fallback for this region
-                log.warning(
-                    "POU-RBF [%s] region %d: %d Claire CPs < 4 — IDW fallback.",
-                    name, r_idx, len(claire_r_idx),
-                )
-                r_disp = _transfer_idw(target_verts[tgt_r_idx], claire_disp, full_tree, k=4)
-                target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
-                continue
-
-            cp_pos = claire_neutral_m[claire_r_idx]   # (K, 3)
-            cp_disp = claire_disp[claire_r_idx]        # (K, 3)
-            tgt_r_pos = target_verts[tgt_r_idx]        # (M, 3)
-
-            try:
-                rbf = RBFInterpolator(
-                    cp_pos, cp_disp,
-                    kernel="thin_plate_spline",
-                    degree=1,
-                    smoothing=1e-3,
-                )
-                r_disp = rbf(tgt_r_pos)   # (M, 3)
-            except Exception as exc:
-                log.warning(
-                    "POU-RBF [%s] region %d RBF failed (%s) — IDW fallback.",
-                    name, r_idx, exc,
-                )
-                r_disp = _transfer_idw(tgt_r_pos, claire_disp, full_tree, k=4)
-
-            # Accumulate with Shepard weight for this region
-            target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
-
+    # Reassemble in canonical order and log per-shape stats.
+    _CHECK_SHAPES = {"eyeBlinkLeft", "eyeBlinkRight", "mouthSmileLeft", "mouthSmileRight"}
+    for name, target_disp in results:
         target_morph_targets[name] = target_disp
         mags = np.linalg.norm(target_disp, axis=1)
+        nonzero = int((mags > 1e-9).sum())
         log.info(
             "POU-RBF %-30s  mean=%.5fm  max=%.5fm  nonzero=%d/%d",
-            name, mags.mean(), mags.max(), int((mags > 1e-9).sum()), N,
+            name, mags.mean(), mags.max(), nonzero, N,
         )
+        if name in _CHECK_SHAPES:
+            print(
+                f"[REGION-CHECK] {name}: nonzero={nonzero}/{N}",
+                flush=True,
+            )
 
     # Upper-face anchoring: remove rigid offset from lower-face blendshapes
     # (same correction as the classic pipeline)

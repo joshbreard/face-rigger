@@ -50,7 +50,23 @@ _REGION_SEED_LM: list[list[int]] = [
 ]
 
 # Shepard boundary-blend radius (metres).
-REGION_RADIUS_M: float = 0.030  # 30 mm
+REGION_RADIUS_M: float = 0.065  # 65 mm
+
+# Per-region expansion radii (metres).  Subtracted from each region's min
+# seed-distance before argmin, biasing assignment toward larger regions.
+# Eye/mouth/jaw need bigger radii so enough target verts land in those regions.
+_REGION_EXPANSION_M: list[float] = [
+    0.065,  # 0 left_eye
+    0.065,  # 1 right_eye
+    0.040,  # 2 nose
+    0.055,  # 3 mouth
+    0.040,  # 4 left_brow
+    0.040,  # 5 right_brow
+    0.060,  # 6 forehead
+    0.055,  # 7 left_cheek  (mouthSmileLeft lives here)
+    0.055,  # 8 right_cheek (mouthSmileRight lives here)
+    0.070,  # 9 jaw
+]
 
 
 def detect_landmarks(
@@ -284,7 +300,13 @@ def _compute_region_mask(
             d = np.linalg.norm(verts - s, axis=1)
             np.minimum(min_dists[:, r_idx], d, out=min_dists[:, r_idx])
 
-    mask = np.argmin(min_dists, axis=1).astype(np.int32)
+    # Subtract per-region expansion to bias assignment toward larger regions.
+    # A vertex 0.060 m from eye seeds beats a vertex 0.058 m from cheek seeds
+    # when eye expansion (0.065) > cheek expansion (0.055): -0.005 < 0.003.
+    expansion = np.array(_REGION_EXPANSION_M, dtype=np.float64)
+    adjusted = min_dists - expansion[np.newaxis, :]  # (N, 10)
+
+    mask = np.argmin(adjusted, axis=1).astype(np.int32)
     # Fallback for vertices where all regions had no seeds
     all_inf = np.all(min_dists == np.inf, axis=1)
     mask[all_inf] = 9  # assign to jaw

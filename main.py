@@ -31,6 +31,7 @@ from rigger.transfer import (
     transfer_morph_targets,
     transfer_morph_targets_pou_rbf,
 )
+from rigger.validator import score_rig
 
 TMP_DIR = Path("tmp")
 
@@ -50,9 +51,6 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Key blendshapes that must have mean displacement > 1mm to pass validation.
-_KEY_BLENDSHAPES = ["jawOpen", "eyeBlinkLeft", "eyeBlinkRight", "mouthSmileLeft", "mouthSmileRight"]
 
 
 @app.on_event("startup")
@@ -298,26 +296,17 @@ async def rig(
 
         # ── Output validation ────────────────────────────────────────────────
         log.info("=== Output validation ===")
-        all_pass = True
-        validation_data: dict[str, dict] = {}
-        for name in _KEY_BLENDSHAPES:
-            delta = blendshapes_orig.get(name, np.zeros((1, 3)))
-            mean_mag = float(np.linalg.norm(delta, axis=1).mean())
-            passed = mean_mag >= 0.001
-            validation_data[name] = {
-                "mean_displacement_m": round(mean_mag, 6),
-                "mean_displacement_mm": round(mean_mag * 1000, 3),
-                "pass": passed,
-            }
-            if not passed:
-                log.warning("VALIDATION FAIL: %s mean=%.6fm < 0.001m", name, mean_mag)
-                all_pass = False
-            else:
-                log.info("VALIDATION OK:   %s mean=%.5fm", name, mean_mag)
-        if all_pass:
-            log.info("All key blendshapes passed validation (mean > 1mm).")
-        else:
-            log.warning("One or more key blendshapes failed validation — check alignment and scale.")
+        validation_data = score_rig(blendshapes_orig)
+        all_pass = validation_data["all_pass"]
+        overall_score = validation_data["overall_score"]
+        fail_count = validation_data["fail_count"]
+        pass_c = validation_data["pass_c"]
+        failing = validation_data["failing_blendshapes"]
+        critical_failures = validation_data["critical_failures"]
+        log.info(
+            "Rig quality: score=%.2f pass=%d/52 critical_failures=%s",
+            overall_score, pass_c, critical_failures,
+        )
 
         # Copy output outside the TemporaryDirectory before it's cleaned up.
         final_path = Path(tempfile.mktemp(suffix=".glb"))
@@ -329,6 +318,8 @@ async def rig(
         _validate_path.write_text(json.dumps(validation_data))
         asyncio.get_event_loop().create_task(_delete_after_delay(_validate_path, 600.0))
 
+    failures_header = ",".join(failing)
+
     # Clean up the temp preview file now that rigging is done.
     if temp_id is not None:
         _delete_file(TMP_DIR / f"{temp_id}.glb")
@@ -338,7 +329,13 @@ async def rig(
         path=str(final_path),
         media_type="model/gltf-binary",
         filename="rigged_output.glb",
-        headers={"X-Rig-Id": rig_id, "Access-Control-Expose-Headers": "X-Rig-Id"},
+        headers={
+            "X-Rig-Id": rig_id,
+            "X-Rig-Pass": str(all_pass).lower(),
+            "X-Rig-Score": f"{overall_score:.2f}",
+            "X-Rig-Failures": failures_header,
+            "Access-Control-Expose-Headers": "X-Rig-Id, X-Rig-Pass, X-Rig-Score, X-Rig-Failures",
+        },
         background=BackgroundTask(_delete_file, final_path),
     )
 
