@@ -112,6 +112,13 @@ SMILE_MEAN_BOOST_MIN: float = 0.5
 SMILE_MEAN_BOOST_MAX: float = 3.0
 
 # ---------------------------------------------------------------------------
+# Boundary falloff — attenuates displacement near open mesh edges to prevent
+# spiking / shearing at the torn neck / shirt cutoff.
+# ---------------------------------------------------------------------------
+_BOUNDARY_FALLOFF_MM: float = 15.0  # falloff distance from open boundary (mm)
+_BOUNDARY_FALLOFF_POWER: float = 2.0  # power curve exponent (2 = quadratic, smoother than linear)
+
+# ---------------------------------------------------------------------------
 # Module-level Claire data — populated by _load_bs_skin() at import time.
 # ---------------------------------------------------------------------------
 
@@ -582,6 +589,45 @@ def _transfer_landmark_anchored(
     return blend_weight * rbf_disp + (1.0 - blend_weight) * idw_disp
 
 
+def _compute_boundary_falloff_weights(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Compute per-vertex weights that attenuate displacement near open mesh boundaries.
+
+    Vertices on the boundary get weight 0; vertices at or beyond
+    ``_BOUNDARY_FALLOFF_MM`` mm from the boundary get weight 1.  Intermediate
+    vertices follow a smooth power curve.
+
+    Returns shape (N,) float64 array of weights in [0, 1].
+    """
+    import trimesh.grouping
+
+    edges_sorted = mesh.edges_sorted  # (E, 2) — each half-edge sorted low→high
+    # Edges appearing in only one face are boundary (open) edges.
+    boundary_edge_mask = trimesh.grouping.group_rows(edges_sorted, require_count=1)
+    boundary_edges = edges_sorted[boundary_edge_mask]
+
+    if len(boundary_edges) == 0:
+        log.info("Boundary falloff: closed mesh — no boundary vertices detected; returning all-ones weights.")
+        return np.ones(len(mesh.vertices), dtype=np.float64)
+
+    boundary_vert_indices = np.unique(boundary_edges.ravel())
+    boundary_positions = np.asarray(mesh.vertices, dtype=np.float64)[boundary_vert_indices]
+
+    tree = KDTree(boundary_positions)
+    dists, _ = tree.query(np.asarray(mesh.vertices, dtype=np.float64))
+
+    falloff_dist = _BOUNDARY_FALLOFF_MM / 1000.0  # mm → metres
+    weights = np.minimum(1.0, (dists / falloff_dist) ** (1.0 / _BOUNDARY_FALLOFF_POWER))
+
+    log.info(
+        "Boundary falloff: %d boundary vertices detected, falloff=%.1fmm, power=%.1f  "
+        "weights min=%.4f  max=%.4f  mean=%.4f",
+        len(boundary_vert_indices), _BOUNDARY_FALLOFF_MM, _BOUNDARY_FALLOFF_POWER,
+        float(weights.min()), float(weights.max()), float(weights.mean()),
+    )
+
+    return weights
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -779,7 +825,7 @@ def transfer_morph_targets(
     # just below jaw_cutoff_y.  Outside the blend zone the weight is either
     # 0 (above cutoff, fully suppressed) or 1 (below cutoff-15mm, full motion).
     # Shape: (N,) float32, values in [0, 1].
-    _JAW_BLEND_MM   = 0.015                        # 15 mm blend zone
+    _JAW_BLEND_MM   = 0.025                        # 25 mm blend zone
     _jaw_blend_low  = _jaw_cutoff_y - _JAW_BLEND_MM
     _jaw_open_weights = np.clip(
         (_jaw_cutoff_y - _y_verts) / _JAW_BLEND_MM,
@@ -810,6 +856,9 @@ def transfer_morph_targets(
         _lower_lip_y,  int(_below_lip_mask.sum()),   len(target_verts),
         _nose_base_y,  int(_below_nose_base.sum()),  len(target_verts),
     )
+
+    # ── Boundary falloff weights (attenuate near open mesh edges) ──────────
+    _boundary_weights = _compute_boundary_falloff_weights(target_mesh)
 
     target_morph_targets: dict[str, np.ndarray] = {}
     jaw_transferred_mean: float | None = None
@@ -898,6 +947,9 @@ def transfer_morph_targets(
                 "(%d in blend zone, %d had |disp|>0.1mm)",
                 name, n_masked, len(target_verts), _nose_base_y, n_blended, n_active_masked,
             )
+
+        # ── Boundary falloff (last step before storing) ─────────────────────
+        target_disp = target_disp * _boundary_weights[:, np.newaxis]
 
         target_morph_targets[name] = target_disp
 
@@ -1599,6 +1651,11 @@ def transfer_morph_targets_pou_rbf(
                 f"[REGION-CHECK] {name}: nonzero={nonzero}/{N}",
                 flush=True,
             )
+
+    # ── Boundary falloff (attenuate near open mesh edges) ───────────────────
+    _boundary_weights = _compute_boundary_falloff_weights(aligned_head)
+    for _bname in list(target_morph_targets):
+        target_morph_targets[_bname] = target_morph_targets[_bname] * _boundary_weights[:, np.newaxis]
 
     # Upper-face anchoring: remove rigid offset from lower-face blendshapes
     # (same correction as the classic pipeline)
