@@ -812,6 +812,12 @@ def transfer_morph_targets(
     )
 
     # Blendshape → mask group membership.
+    # Jaw-rigid shapes: displacement should extend to the full jaw underside.
+    _JAW_RIGID_SHAPES: frozenset[str] = frozenset({
+        "jawOpen", "jawForward", "jawLeft", "jawRight",
+    })
+    _JAW_DIFFUSE_RADIUS_M: float = 0.030  # 30 mm propagation radius
+
     _MASK_LOWER_JAW: frozenset[str] = frozenset({
         "jawOpen", "jawForward", "jawLeft", "jawRight",
         "mouthClose", "mouthFunnel", "mouthPucker",
@@ -938,6 +944,57 @@ def transfer_morph_targets(
                 "(%d had |disp|>0.1mm — these were suppressed)",
                 name, n_masked, len(target_verts), _nose_base_y, n_active_masked,
             )
+
+        # ── Jaw diffusion: propagate displacement to underside gap vertices ──
+        # The frontal-only RBF control points miss the jaw underside, leaving
+        # those vertices with zero displacement.  For rigid jaw shapes, fill
+        # them in by IDW-interpolating from nearby displaced vertices.
+        if name in _JAW_RIGID_SHAPES:
+            _mags_post = np.linalg.norm(target_disp, axis=1)
+            _has_disp = _mags_post > 1e-5
+            _gap = ~_above_jaw_cutoff & ~_has_disp  # below cutoff, no displacement
+            _source = _has_disp                      # has displacement (anywhere)
+            n_gap = int(_gap.sum())
+            n_src = int(_source.sum())
+
+            if n_gap > 0 and n_src > 0:
+                _src_tree = KDTree(target_verts[_source])
+                _gap_verts = target_verts[_gap]
+                _k = min(4, n_src)
+                _dists, _idxs = _src_tree.query(_gap_verts, k=_k)
+
+                if _k == 1:
+                    _dists = _dists[:, np.newaxis]
+                    _idxs = _idxs[:, np.newaxis]
+
+                _src_disp = target_disp[_source]
+                _gap_idx = np.where(_gap)[0]
+                _nearest = _dists[:, 0]
+                _close = _nearest < _JAW_DIFFUSE_RADIUS_M
+
+                # IDW weights, zeroing contributions beyond the radius
+                _w = 1.0 / (_dists + 1e-9)
+                _w[_dists > _JAW_DIFFUSE_RADIUS_M] = 0.0
+                _wsum = _w.sum(axis=1, keepdims=True)
+                _wsum[_wsum < 1e-9] = 1.0
+                _w /= _wsum
+
+                # Interpolated displacement: (n_gap, k) @ (n_gap, k, 3)
+                _interp = np.einsum('ij,ijk->ik', _w, _src_disp[_idxs])
+
+                # Smooth distance falloff to avoid a hard edge at the radius
+                _falloff = np.clip(1.0 - _nearest / _JAW_DIFFUSE_RADIUS_M, 0.0, 1.0) ** 2
+
+                target_disp = target_disp.copy()
+                _fill_mask = _close
+                target_disp[_gap_idx[_fill_mask]] = (
+                    _interp[_fill_mask] * _falloff[_fill_mask, np.newaxis]
+                )
+                n_filled = int(_fill_mask.sum())
+                log.info(
+                    "Jaw diffuse [%-20s]  filled %d/%d gap verts within %.0fmm of displaced verts",
+                    name, n_filled, n_gap, _JAW_DIFFUSE_RADIUS_M * 1000,
+                )
 
         target_morph_targets[name] = target_disp
 

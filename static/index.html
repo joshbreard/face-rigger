@@ -210,10 +210,6 @@
       gap: 16px;
       height: 440px;
     }
-    #preview-panel.rc-active {
-      grid-template-columns: 1fr 320px;
-    }
-
     #canvas-wrap {
       border-radius: 10px;
       overflow: hidden;
@@ -273,7 +269,7 @@
 
     .morph-row {
       display: grid;
-      grid-template-columns: 20px 1fr 80px 28px;
+      grid-template-columns: 20px 1fr 80px;
       align-items: center;
       gap: 8px;
       padding: 5px 12px;
@@ -617,22 +613,6 @@
     }
 
     /* ── Correction editor ────────────────────────────────────────────── */
-    .morph-edit-btn {
-      background: none;
-      border: 1px solid #2a2a35;
-      border-radius: 4px;
-      color: #6b6b75;
-      font-size: 0.68rem;
-      cursor: pointer;
-      padding: 1px 5px;
-      transition: all 0.15s;
-      line-height: 1.2;
-    }
-    .morph-edit-btn:hover {
-      border-color: #6e6eff;
-      color: #a0a0ff;
-    }
-
     #edit-toolbar {
       position: absolute;
       top: 0; left: 0; right: 0;
@@ -640,18 +620,19 @@
       background: rgba(17, 17, 20, 0.95);
       backdrop-filter: blur(6px);
       border-bottom: 1px solid #2a2a30;
-      padding: 8px 14px;
+      padding: 6px 10px;
       display: none;
       align-items: center;
-      gap: 10px;
-      font-size: 0.78rem;
+      gap: 8px;
+      font-size: 0.75rem;
       color: #c0c0d0;
+      overflow-x: auto;
+      white-space: nowrap;
     }
     #edit-bs-name {
       font-weight: 600;
       color: #a0a0ff;
     }
-    .edit-tool-group { display: flex; gap: 4px; }
     .edit-tool-btn {
       background: #1e1e24;
       border: 1px solid #2a2a35;
@@ -681,7 +662,14 @@
       color: #6b6b75;
       font-size: 0.72rem;
     }
-    #edit-brush-slider { width: 60px; accent-color: #6e6eff; }
+    #edit-brush-slider { width: 70px; accent-color: #6e6eff; }
+    #edit-brush-val {
+      min-width: 42px;
+      text-align: right;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.72rem;
+      color: #6b6b75;
+    }
     .edit-influence-label {
       display: flex;
       align-items: center;
@@ -690,6 +678,7 @@
       font-size: 0.75rem;
       font-weight: 600;
     }
+    #edit-morph-slider { width: 140px; accent-color: #22c55e; }
     #edit-influence-slider { width: 90px; accent-color: #6e6eff; }
     #edit-influence-val {
       min-width: 30px;
@@ -714,6 +703,56 @@
       pointer-events: none;
       box-shadow: 0 4px 20px rgba(34, 197, 94, 0.3);
     }
+    #mirror-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 300;
+      background: rgba(0, 0, 0, 0.6);
+      align-items: center;
+      justify-content: center;
+    }
+    #mirror-modal.show { display: flex; }
+    #mirror-modal-box {
+      background: #1a1a22;
+      border: 1px solid #2a2a35;
+      border-radius: 12px;
+      padding: 24px 28px;
+      max-width: 400px;
+      text-align: center;
+    }
+    #mirror-modal-text {
+      color: #c0c0d0;
+      font-size: 0.9rem;
+      margin-bottom: 18px;
+      line-height: 1.5;
+    }
+    #mirror-modal-btns {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+    }
+    #mirror-yes-btn {
+      background: rgba(34, 197, 94, 0.15);
+      border: 1px solid #22c55e;
+      color: #86efac;
+      border-radius: 6px;
+      padding: 8px 20px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #mirror-yes-btn:hover { background: rgba(34, 197, 94, 0.25); }
+    #mirror-no-btn {
+      background: none;
+      border: 1px solid #2a2a35;
+      color: #8888a0;
+      border-radius: 6px;
+      padding: 8px 20px;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    #mirror-no-btn:hover { background: rgba(255, 255, 255, 0.04); }
     #edit-toast.show {
       opacity: 1;
       transform: translateX(-50%) translateY(0);
@@ -735,220 +774,44 @@
       color: #86efac !important;
     }
     .edit-save-btn:hover { background: rgba(34, 197, 94, 0.2) !important; }
-    #edit-brush-cursor {
-      position: absolute;
-      border: 1.5px solid rgba(110, 110, 255, 0.5);
-      border-radius: 50%;
-      pointer-events: none;
-      display: none;
-      z-index: 11;
-      transform: translate(-50%, -50%);
+
+    /* ── Full-screen edit mode ──────────────────────────────────────── */
+    #preview-panel.fullscreen-edit {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      height: 100vh !important;
+      border-radius: 0;
+      background: #0d0d0f;
+      grid-template-columns: 1fr 240px;
+    }
+    #preview-panel.fullscreen-edit #canvas-wrap { border-radius: 0; }
+    #preview-panel.fullscreen-edit #morph-panel {
+      border-radius: 0;
+      border-top: none;
+      border-bottom: none;
+      border-right: none;
     }
 
-    /* ── Region correction panel ──────────────────────────────────────── */
-    #rc-panel {
+    /* ── Edit tool group ────────────────────────────────────────────── */
+    .edit-tool-group {
       display: flex;
-      flex-direction: column;
-      gap: 0;
-      background: #111114;
-      border: 1px solid #22222a;
-      border-radius: 10px;
-      overflow: hidden;
-      width: 320px;
-      min-width: 320px;
-    }
-    .rc-step-indicator {
-      display: flex;
-      border-bottom: 1px solid #22222a;
-      flex-shrink: 0;
-    }
-    .rc-step-tab {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
       gap: 2px;
-      padding: 8px 4px;
-      font-size: 0.65rem;
-      color: #44445a;
-      cursor: default;
-      border-right: 1px solid #22222a;
-      transition: all 0.15s;
-      user-select: none;
     }
-    .rc-step-tab:last-child { border-right: none; }
-    .rc-step-tab .rc-num {
-      width: 20px; height: 20px;
-      border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 0.7rem; font-weight: 700;
-      background: #1e1e24;
-      border: 1px solid #2a2a35;
-      color: #55556a;
-    }
-    .rc-step-tab.active .rc-num {
-      background: #6e6eff;
-      border-color: #6e6eff;
-      color: #fff;
-    }
-    .rc-step-tab.active { color: #c0c0d0; }
-    .rc-step-tab.completed .rc-num {
-      background: rgba(34, 197, 94, 0.15);
-      border-color: #22c55e;
-      color: #22c55e;
-    }
-    .rc-step-tab.completed { color: #86efac; cursor: pointer; }
-    .rc-step-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56px; }
-    .rc-body {
-      flex: 1;
-      overflow-y: auto;
-      padding: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .rc-body::-webkit-scrollbar { width: 4px; }
-    .rc-body::-webkit-scrollbar-track { background: transparent; }
-    .rc-body::-webkit-scrollbar-thumb { background: #2a2a35; border-radius: 2px; }
-    .rc-header {
+    .edit-paint-strength {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .rc-header .rc-title {
-      font-size: 0.82rem;
-      font-weight: 600;
-      color: #c0c0d0;
-    }
-    .rc-header .rc-badge {
-      font-size: 0.68rem;
-      padding: 2px 8px;
-      border-radius: 4px;
-      background: rgba(255, 107, 53, 0.12);
-      color: #FF6B35;
-    }
-    .rc-info {
-      font-size: 0.78rem;
+      gap: 6px;
       color: #6b6b75;
-      line-height: 1.5;
-    }
-    .rc-btn {
-      padding: 8px 14px;
-      border-radius: 6px;
-      font-size: 0.78rem;
-      font-weight: 600;
-      cursor: pointer;
-      border: 1px solid #2a2a35;
-      transition: all 0.15s;
-      text-align: center;
-    }
-    .rc-btn-primary {
-      background: #6e6eff;
-      border-color: #6e6eff;
-      color: #fff;
-    }
-    .rc-btn-primary:hover { background: #5a5aee; }
-    .rc-btn-secondary {
-      background: transparent;
-      color: #8888a0;
-    }
-    .rc-btn-secondary:hover { background: rgba(255,255,255,0.04); }
-    .rc-btn-save {
-      background: rgba(34, 197, 94, 0.15);
-      border-color: #22c55e;
-      color: #86efac;
-    }
-    .rc-btn-save:hover { background: rgba(34, 197, 94, 0.25); }
-    .rc-slider-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 0.75rem;
-      color: #8888a0;
-    }
-    .rc-slider-row label { flex-shrink: 0; min-width: 60px; }
-    .rc-slider-row input[type="range"] { flex: 1; accent-color: #6e6eff; }
-    .rc-slider-row .rc-val {
-      font-family: monospace;
       font-size: 0.72rem;
-      color: #6b6b75;
-      min-width: 36px;
+    }
+    #edit-paint-strength-slider { width: 60px; accent-color: #22c55e; }
+    #edit-paint-strength-val {
+      min-width: 28px;
       text-align: right;
-    }
-    .rc-paint-group {
-      display: flex;
-      gap: 4px;
-    }
-    .rc-paint-btn {
-      flex: 1;
-      padding: 6px;
-      border-radius: 5px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
       font-size: 0.72rem;
-      font-weight: 600;
-      cursor: pointer;
-      border: 1px solid #2a2a35;
-      background: #1e1e24;
-      color: #8888a0;
-      transition: all 0.15s;
-    }
-    .rc-paint-btn.add-active {
-      background: rgba(34, 197, 94, 0.12);
-      border-color: #22c55e;
-      color: #86efac;
-    }
-    .rc-paint-btn.remove-active {
-      background: rgba(239, 68, 68, 0.12);
-      border-color: #ef4444;
-      color: #fca5a5;
-    }
-    .rc-dropdown {
-      width: 100%;
-      background: #1e1e24;
-      border: 1px solid #2a2a35;
-      border-radius: 5px;
-      color: #c0c0d0;
-      font-size: 0.75rem;
-      padding: 6px 8px;
-      cursor: pointer;
-    }
-    .rc-dropdown:focus { border-color: #6e6eff; outline: none; }
-    .rc-section-label {
-      font-size: 0.7rem;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: #44445a;
-    }
-    .rc-mirror-box {
-      background: #1a1a1e;
-      border: 1px solid #22222a;
-      border-radius: 6px;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .rc-drag-label {
-      position: absolute;
-      background: rgba(17, 17, 20, 0.85);
-      color: #c0c0d0;
-      font-size: 0.7rem;
-      font-family: monospace;
-      padding: 3px 8px;
-      border-radius: 4px;
-      pointer-events: none;
-      z-index: 12;
-      white-space: nowrap;
-    }
-    #rc-brush-sphere-indicator {
-      position: absolute;
-      border: 1.5px solid rgba(34, 197, 94, 0.5);
-      border-radius: 50%;
-      pointer-events: none;
-      display: none;
-      z-index: 11;
-      transform: translate(-50%, -50%);
+      color: #6b6b75;
     }
 
     /* ── Responsive collapse ───────────────────────────────────────────── */
@@ -1069,124 +932,34 @@
           <!-- Correction editor toolbar -->
           <div id="edit-toolbar">
             <span id="edit-bs-name"></span>
-            <button class="edit-action-btn" id="edit-exit-btn" title="Exit edit mode" style="background:rgba(239,68,68,0.12);border-color:#ef4444;color:#fca5a5;margin-right:auto;">Exit</button>
+            <div class="edit-sep"></div>
+            <label class="edit-influence-label">Morph <input type="range" id="edit-morph-slider" min="0" max="1" step="0.01" value="0" /> <span id="edit-morph-val">0.00</span></label>
+            <div class="edit-sep"></div>
+            <label class="edit-influence-label">Influence <input type="range" id="edit-influence-slider" min="0" max="1" step="0.01" value="1" /> <span id="edit-influence-val">1.00</span></label>
+            <div class="edit-sep"></div>
+            <button class="edit-tool-btn active" id="edit-heatmap-btn">Heatmap</button>
+            <div class="edit-sep"></div>
             <div class="edit-tool-group">
-              <button class="edit-tool-btn active" id="edit-select-btn" title="Brush select vertices (LMB drag, Shift = deselect)">Select</button>
-              <button class="edit-tool-btn" id="edit-move-btn" title="Drag to move selected vertices">Move</button>
+              <button class="edit-tool-btn active" id="edit-sculpt-btn">Sculpt</button>
+              <button class="edit-tool-btn" id="edit-paint-btn">Paint</button>
+              <button class="edit-tool-btn" id="edit-erase-btn">Erase</button>
             </div>
             <div class="edit-sep"></div>
-            <label class="edit-brush-label">Brush <input type="range" id="edit-brush-slider" min="5" max="60" value="20" /></label>
+            <label class="edit-brush-label">Radius <input type="range" id="edit-brush-slider" min="0.005" max="0.08" step="0.001" value="0.025" /> <span id="edit-brush-val">0.025m</span></label>
             <div class="edit-sep"></div>
-            <label class="edit-influence-label">Morph <input type="range" id="edit-influence-slider" min="0" max="1" step="0.01" value="1" /> <span id="edit-influence-val">1.00</span></label>
+            <label class="edit-paint-strength">Strength <input type="range" id="edit-paint-strength-slider" min="0.01" max="1" step="0.01" value="0.30" /> <span id="edit-paint-strength-val">0.30</span></label>
             <div class="edit-sep"></div>
-            <button class="edit-action-btn" id="edit-select-all-btn">All</button>
-            <button class="edit-action-btn" id="edit-clear-sel-btn">Clear</button>
-            <div class="edit-sep"></div>
+            <button class="edit-action-btn" id="edit-exit-btn" title="Exit edit mode" style="background:rgba(239,68,68,0.12);border-color:#ef4444;color:#fca5a5;">Exit</button>
             <button class="edit-action-btn edit-save-btn" id="edit-save-btn">Save</button>
             <button class="edit-action-btn" id="edit-cancel-btn">Cancel</button>
           </div>
-          <div id="edit-brush-cursor"></div>
         </div>
 
         <div id="morph-panel">
-          <div id="morph-panel-header">Morph Targets — click name to edit</div>
+          <div id="morph-panel-header">Morph Targets — click to edit</div>
           <div id="morph-list"></div>
         </div>
 
-        <!-- Region correction panel (hidden by default) -->
-        <div id="rc-panel" style="display:none;">
-          <div class="rc-step-indicator" id="rc-step-indicator">
-            <div class="rc-step-tab active" data-step="1"><span class="rc-num">1</span><span class="rc-step-label">Highlight</span></div>
-            <div class="rc-step-tab" data-step="2"><span class="rc-num">2</span><span class="rc-step-label">Preview</span></div>
-            <div class="rc-step-tab" data-step="3"><span class="rc-num">3</span><span class="rc-step-label">Region</span></div>
-            <div class="rc-step-tab" data-step="4"><span class="rc-num">4</span><span class="rc-step-label">Edit</span></div>
-            <div class="rc-step-tab" data-step="5"><span class="rc-num">5</span><span class="rc-step-label">Save</span></div>
-          </div>
-          <div class="rc-body" id="rc-body">
-            <!-- Step 1: Highlight Region -->
-            <div class="rc-step-content" id="rc-step1">
-              <div class="rc-header">
-                <span class="rc-title" id="rc-region-title">Loading...</span>
-                <span class="rc-badge" id="rc-vert-count">0 verts</span>
-              </div>
-              <p class="rc-info">Highlighting region vertices on the mesh.</p>
-            </div>
-            <!-- Step 2: Preview Current Morph -->
-            <div class="rc-step-content" id="rc-step2" style="display:none;">
-              <div class="rc-header"><span class="rc-title">Preview Current Morph</span></div>
-              <div class="rc-slider-row">
-                <label>Influence</label>
-                <input type="range" id="rc-preview-slider" min="0" max="1" step="0.01" value="0" />
-                <span class="rc-val" id="rc-preview-val">0.00</span>
-              </div>
-              <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">
-                <button class="rc-btn rc-btn-secondary" id="rc-skip-to-save">Looks correct — skip to save</button>
-                <button class="rc-btn rc-btn-primary" id="rc-edit-morph">Edit this morph</button>
-              </div>
-            </div>
-            <!-- Step 3: Fix Region -->
-            <div class="rc-step-content" id="rc-step3" style="display:none;">
-              <div class="rc-header"><span class="rc-title">Fix Region?</span></div>
-              <div>
-                <span class="rc-section-label">Jump to region</span>
-                <select class="rc-dropdown" id="rc-region-dropdown">
-                  <option value="0">left_eye</option>
-                  <option value="1">right_eye</option>
-                  <option value="2">nose</option>
-                  <option value="3">mouth</option>
-                  <option value="4">left_brow</option>
-                  <option value="5">right_brow</option>
-                  <option value="6">forehead</option>
-                  <option value="7">left_cheek</option>
-                  <option value="8">right_cheek</option>
-                  <option value="9">jaw</option>
-                </select>
-              </div>
-              <div>
-                <span class="rc-section-label">Paint mode</span>
-                <div class="rc-paint-group">
-                  <button class="rc-paint-btn add-active" id="rc-brush-add">ADD</button>
-                  <button class="rc-paint-btn" id="rc-brush-remove">REMOVE</button>
-                </div>
-              </div>
-              <div class="rc-slider-row">
-                <label>Brush</label>
-                <input type="range" id="rc-brush-size" min="0" max="100" step="1" value="50" />
-                <span class="rc-val" id="rc-brush-size-val">0.025m</span>
-              </div>
-              <button class="rc-btn rc-btn-secondary" id="rc-reset-region">Reset Region</button>
-              <button class="rc-btn rc-btn-primary" id="rc-done-selecting">Done Selecting &rarr;</button>
-            </div>
-            <!-- Step 4: Drag to Correct -->
-            <div class="rc-step-content" id="rc-step4" style="display:none;">
-              <div class="rc-header"><span class="rc-title">Drag to Correct</span></div>
-              <p class="rc-info">Drag the axis handles to offset the morph target. Falloff is applied automatically.</p>
-              <div id="rc-drag-magnitude" style="font-family:monospace;font-size:0.82rem;color:#a0a0ff;margin:4px 0;">0.0 mm</div>
-              <p class="rc-info" style="font-size:0.68rem;">X / Y / Z lock axis &bull; Esc reset</p>
-              <div style="display:flex;gap:8px;margin-top:8px;">
-                <button class="rc-btn rc-btn-secondary" id="rc-preview-toggle">Preview</button>
-                <button class="rc-btn rc-btn-primary" id="rc-looks-good">Looks good &rarr;</button>
-              </div>
-            </div>
-            <!-- Step 5: Mirror + Save -->
-            <div class="rc-step-content" id="rc-step5" style="display:none;">
-              <div class="rc-header"><span class="rc-title">Mirror + Save</span></div>
-              <div class="rc-mirror-box" id="rc-mirror-box">
-                <p class="rc-info" id="rc-mirror-label">Mirror to ...?</p>
-                <div style="display:flex;gap:8px;">
-                  <button class="rc-btn rc-btn-primary" id="rc-mirror-btn">Mirror</button>
-                  <button class="rc-btn rc-btn-secondary" id="rc-skip-mirror">Skip mirror</button>
-                </div>
-              </div>
-              <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">
-                <button class="rc-btn rc-btn-save" id="rc-save-correction">Save Correction</button>
-                <button class="rc-btn rc-btn-secondary" id="rc-save-next">Save &amp; Next</button>
-              </div>
-              <button class="rc-btn rc-btn-secondary" id="rc-cancel" style="margin-top:4px;">Cancel</button>
-            </div>
-          </div>
-        </div>
-        <div id="rc-brush-sphere-indicator"></div>
       </div>
     </div>
 
@@ -1226,6 +999,17 @@
 
     <div id="edit-toast"></div>
 
+    <!-- ── Mirror confirmation modal ── -->
+    <div id="mirror-modal">
+      <div id="mirror-modal-box">
+        <div id="mirror-modal-text"></div>
+        <div id="mirror-modal-btns">
+          <button id="mirror-yes-btn">Yes, mirror</button>
+          <button id="mirror-no-btn">No thanks</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Error ── -->
     <div id="error-section">
       <div class="error-icon">
@@ -1244,7 +1028,6 @@
     import * as THREE from 'three';
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-    import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
     // ── DOM refs ────────────────────────────────────────────────────────
     const card             = document.getElementById('card');
@@ -1279,6 +1062,9 @@
     const landmarkStatus   = document.getElementById('landmark-status');
     const humanCanvasEl    = document.getElementById('human-canvas');
     const humanCanvasLoad  = document.getElementById('human-canvas-loading');
+    canvasEl.addEventListener('contextmenu', e => e.preventDefault());
+    adjustCanvasEl.addEventListener('contextmenu', e => e.preventDefault());
+    humanCanvasEl.addEventListener('contextmenu', e => e.preventDefault());
     const submitHintsBtn   = document.getElementById('submit-hints-btn');
     const skipHintsBtn     = document.getElementById('skip-hints-btn');
 
@@ -1333,42 +1119,44 @@
     let editMode = false;
     let editMorphIdx = null;
     let editMorphName = null;
-    let editPointsMesh = null;
-    let editOccluderMesh = null;  // invisible clone for brush occlusion raycasts
     let editOriginalDeltas = null;
-    let editSelectedVerts = new Set();
-    let editAffectedSet = new Set();
-    let editHoveredVerts = new Set();
     let editOriginalMaterials = [];
-    let editHeadBBox = null;
-    let editTool = 'select';
-    let editBrushRadius = 20;
+    let editHeatmapOn = true;
+    let editBrushRadius = 0.025;       // world-space metres
     let editDragging = false;
-    let editLastScreenPos = null;
-    let editDragStartPos = null;       // Bug 2: drag threshold origin
-    let editDragStarted = false;       // Bug 2: true once threshold exceeded
-    let editOrigVertPositions = null;  // Bug 3: original positions at drag start
-    let editHeadVerts = null;          // Set of vertex indices in head bounding box
-    let editOccluderTris = null;       // Float32Array of morphed triangle positions for worker
-    let brushUpdatePending = false;    // RAF throttle flag
-    let brushPendingEvent = null;      // latest pointer event data for RAF
-    let brushPendingDrag = false;      // whether the pending update is a drag action
-    let brushPendingAddToSel = true;   // selection mode for pending drag
-    let occlusionWorker = null;        // Web Worker for heavy occlusion tests
+    let editDragPivotIdx = null;       // nearest vertex index at pointerdown
+    let editDragOrigDeltas = null;     // Map<vertIdx, Vector3> snapshot at drag start
+    let editDragStartWorld = null;     // world-space hit point at drag start
+    let editDragStartScreen = null;    // screen position at drag start
+    let editBrushMesh = null;          // wireframe sphere cursor
+    let editRaycaster = new THREE.Raycaster();
+    let editColorAttr = null;          // vertex color BufferAttribute
+    let occlusionWorker = null;        // kept for safe termination
+    let editToolMode = 'sculpt';       // 'sculpt' | 'paint' | 'erase'
+    let editPaintStrength = 0.30;
+    let editPainting = false;          // true during paint/erase drag
+    let editPeakMag = 0;               // cached peak delta magnitude for paint brush
+    let editToolModeOverride = null;   // for ctrl+click erase override
+    let hoverOverlayIdx = null;        // morph idx for hover preview
 
-    const editToolbar      = document.getElementById('edit-toolbar');
-    const editBsName       = document.getElementById('edit-bs-name');
-    const editSelectBtn    = document.getElementById('edit-select-btn');
-    const editMoveBtn      = document.getElementById('edit-move-btn');
-    const editBrushSlider  = document.getElementById('edit-brush-slider');
-    const editSelectAllBtn = document.getElementById('edit-select-all-btn');
-    const editClearSelBtn  = document.getElementById('edit-clear-sel-btn');
-    const editSaveBtn      = document.getElementById('edit-save-btn');
-    const editCancelBtn    = document.getElementById('edit-cancel-btn');
-    const editBrushCursor  = document.getElementById('edit-brush-cursor');
+    const editToolbar         = document.getElementById('edit-toolbar');
+    const editBsName          = document.getElementById('edit-bs-name');
+    const editHeatmapBtn      = document.getElementById('edit-heatmap-btn');
+    const editBrushSlider     = document.getElementById('edit-brush-slider');
+    const editBrushVal        = document.getElementById('edit-brush-val');
+    const editSaveBtn         = document.getElementById('edit-save-btn');
+    const editCancelBtn       = document.getElementById('edit-cancel-btn');
     const editInfluenceSlider = document.getElementById('edit-influence-slider');
-    const editInfluenceVal = document.getElementById('edit-influence-val');
-    const editToast        = document.getElementById('edit-toast');
+    const editInfluenceVal    = document.getElementById('edit-influence-val');
+    const editMorphSlider     = document.getElementById('edit-morph-slider');
+    const editMorphVal        = document.getElementById('edit-morph-val');
+    const editToast           = document.getElementById('edit-toast');
+    const editSculptBtn       = document.getElementById('edit-sculpt-btn');
+    const editPaintBtn        = document.getElementById('edit-paint-btn');
+    const editEraseBtn        = document.getElementById('edit-erase-btn');
+    const editPaintStrengthSlider = document.getElementById('edit-paint-strength-slider');
+    const editPaintStrengthValEl  = document.getElementById('edit-paint-strength-val');
+    const previewPanel        = document.getElementById('preview-panel');
 
     // ── Section switcher ────────────────────────────────────────────────
     function showSection(section) {
@@ -1588,6 +1376,11 @@
       humControls = new OrbitControls(humCamera, humRenderer.domElement);
       humControls.enableDamping = true;
       humControls.dampingFactor = 0.07;
+      humControls.mouseButtons = {
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.PAN,
+      };
 
       // Load the original GLB for landmark annotation.
       fetch(`/rig-preview/${currentRigId}`)
@@ -1838,6 +1631,11 @@
       adjControls = new OrbitControls(adjCamera, adjRenderer.domElement);
       adjControls.enableDamping = true;
       adjControls.dampingFactor = 0.07;
+      adjControls.mouseButtons = {
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.DOLLY,
+        RIGHT: THREE.MOUSE.PAN,
+      };
 
       const loader = new GLTFLoader();
       loader.load(
@@ -2171,7 +1969,6 @@
     }
 
     function _teardownRenderer() {
-      if (rcActive) _rcClose(false);
       if (editMode) _exitEditMode(false);
       if (animId) cancelAnimationFrame(animId);
       if (currentAnimId) cancelAnimationFrame(currentAnimId);
@@ -2215,8 +2012,10 @@
         const nameEl = document.createElement('span');
         nameEl.className = 'morph-name';
         nameEl.textContent = name;
-        nameEl.title = 'Click to open region correction editor';
-        nameEl.addEventListener('click', () => _rcOpen(idx, name));
+        nameEl.title = 'Click to edit morph target · Hover to preview region';
+        nameEl.addEventListener('click', () => _enterEditMode(idx, name));
+        nameEl.addEventListener('mouseenter', () => { if (!editMode) _showMorphRegionOverlay(idx); });
+        nameEl.addEventListener('mouseleave', () => { if (!editMode) _hideMorphRegionOverlay(); });
 
         const slider = document.createElement('input');
         slider.type = 'range';
@@ -2226,19 +2025,9 @@
           if (headMesh) headMesh.morphTargetInfluences[idx] = parseFloat(slider.value);
         });
 
-        const editBtn = document.createElement('button');
-        editBtn.className = 'morph-edit-btn';
-        editBtn.textContent = '✎';
-        editBtn.title = 'Edit morph target';
-        editBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          _enterEditMode(idx, name);
-        });
-
         row.appendChild(statusEl);
         row.appendChild(nameEl);
         row.appendChild(slider);
-        row.appendChild(editBtn);
         morphList.appendChild(row);
       }
     }
@@ -2281,95 +2070,350 @@
 
     // ── Correction editor ─────────────────────────────────────────────
 
-    editSelectBtn.addEventListener('click', () => _setEditTool('select'));
-    editMoveBtn.addEventListener('click', () => _setEditTool('move'));
-    editBrushSlider.addEventListener('input', () => {
-      editBrushRadius = parseInt(editBrushSlider.value);
-      _updateBrushCursor();
-    });
-    editSelectAllBtn.addEventListener('click', () => {
-      if (!headMesh || editMorphIdx === null) return;
-      const baseAttr = headMesh.geometry.attributes.position;
-      const tmpV = new THREE.Vector3();
-      for (let i = 0; i < baseAttr.count; i++) {
-        tmpV.set(baseAttr.getX(i), baseAttr.getY(i), baseAttr.getZ(i));
-        if (editHeadBBox && editHeadBBox.containsPoint(tmpV)) {
-          editSelectedVerts.add(i);
-        }
-      }
-      _updateEditPointColors();
-    });
-    editClearSelBtn.addEventListener('click', () => {
-      editSelectedVerts.clear();
-      _updateEditPointColors();
-    });
     editInfluenceSlider.addEventListener('input', () => {
       if (!editMode || editMorphIdx === null || !headMesh) return;
       const v = parseFloat(editInfluenceSlider.value);
       headMesh.morphTargetInfluences[editMorphIdx] = v;
       editInfluenceVal.textContent = v.toFixed(2);
-      // Sync the morph list slider too
       const activeSlider = morphList.querySelector('.morph-row[data-idx="' + editMorphIdx + '"] .morph-slider');
       if (activeSlider) activeSlider.value = v;
-      // Update point positions to match current influence level
-      if (editPointsMesh) {
-        const baseAttr = headMesh.geometry.attributes.position;
-        const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
-        const ptAttr = editPointsMesh.geometry.attributes.position;
-        for (let i = 0; i < baseAttr.count; i++) {
-          ptAttr.setXYZ(i,
-            baseAttr.getX(i) + deltaAttr.getX(i) * v,
-            baseAttr.getY(i) + deltaAttr.getY(i) * v,
-            baseAttr.getZ(i) + deltaAttr.getZ(i) * v,
-          );
-        }
-        ptAttr.needsUpdate = true;
-        editPointsMesh.geometry.computeBoundingSphere();
+      if (editHeatmapOn) _applyHeatmap(v);
+    });
+    editMorphSlider.addEventListener('input', () => {
+      if (!editMode || editMorphIdx === null || !headMesh) return;
+      const v = parseFloat(editMorphSlider.value);
+      headMesh.morphTargetInfluences[editMorphIdx] = v;
+      editMorphVal.textContent = v.toFixed(2);
+      // Hide heatmap while previewing so the actual movement is visible
+      if (editHeatmapOn && headMesh.geometry.attributes.color) _removeHeatmap();
+    });
+    editMorphSlider.addEventListener('change', () => {
+      if (!editMode || editMorphIdx === null || !headMesh) return;
+      // Restore influence to 1.0 and re-apply heatmap when done previewing
+      headMesh.morphTargetInfluences[editMorphIdx] = parseFloat(editInfluenceSlider.value);
+      editMorphSlider.value = 0;
+      editMorphVal.textContent = '0.00';
+      if (editHeatmapOn) _applyHeatmap(parseFloat(editInfluenceSlider.value));
+    });
+    editBrushSlider.addEventListener('input', () => {
+      editBrushRadius = parseFloat(editBrushSlider.value);
+      editBrushVal.textContent = editBrushRadius.toFixed(3) + 'm';
+      if (editBrushMesh) editBrushMesh.scale.setScalar(editBrushRadius);
+    });
+    editHeatmapBtn.addEventListener('click', () => {
+      editHeatmapOn = !editHeatmapOn;
+      editHeatmapBtn.classList.toggle('active', editHeatmapOn);
+      if (editHeatmapOn) {
+        _applyHeatmap(parseFloat(editInfluenceSlider.value));
+      } else {
+        _removeHeatmap();
       }
     });
     editSaveBtn.addEventListener('click', () => _exitEditMode(true));
     editCancelBtn.addEventListener('click', () => _exitEditMode(false));
     document.getElementById('edit-exit-btn').addEventListener('click', () => _exitEditMode(false));
 
-    function _setEditTool(tool) {
-      editTool = tool;
-      editSelectBtn.classList.toggle('active', tool === 'select');
-      editMoveBtn.classList.toggle('active', tool === 'move');
-      canvasEl.style.cursor = tool === 'select' ? 'crosshair' : 'grab';
-      editBrushCursor.style.display = (tool === 'select') ? 'block' : 'none';
+    // ── Heatmap helpers ──────────────────────────────────────────────
+
+    /** Compute heatmap color stops from morph deltas. */
+    function _computeHeatmapStops() {
+      if (!headMesh || editMorphIdx === null) return null;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const count = deltaAttr.count;
+
+      // Collect nonzero magnitudes
+      const mags = new Float32Array(count);
+      const nonzero = [];
+      for (let i = 0; i < count; i++) {
+        const dx = deltaAttr.getX(i), dy = deltaAttr.getY(i), dz = deltaAttr.getZ(i);
+        const m = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        mags[i] = m;
+        if (m > 1e-8) nonzero.push(m);
+      }
+      if (nonzero.length === 0) return { mags, p25: 0, p75: 0, max: 0 };
+
+      nonzero.sort((a, b) => a - b);
+      const p25 = nonzero[Math.floor(nonzero.length * 0.25)];
+      const p75 = nonzero[Math.floor(nonzero.length * 0.75)];
+      const max = nonzero[nonzero.length - 1];
+      return { mags, p25, p75, max };
     }
 
-    function _updateBrushCursor(e) {
-      if (!editMode || editTool !== 'select') {
-        editBrushCursor.style.display = 'none';
-        return;
+    /** Interpolate heatmap color for a given magnitude and influence. */
+    function _heatColor(mag, influence, stops) {
+      const m = mag * influence;
+      if (m < 1e-8) return [0.1, 0.1, 0.15];
+      const { p25, p75, max } = stops;
+
+      // Stops: 0→near-black, p25→blue, p75→orange, max→red
+      const S = [
+        { t: 0,   r: 0.1, g: 0.1, b: 0.15 },
+        { t: p25,  r: 0.0, g: 0.3, b: 1.0 },
+        { t: p75,  r: 1.0, g: 0.5, b: 0.0 },
+        { t: max,  r: 1.0, g: 0.1, b: 0.1 },
+      ];
+
+      // Clamp to max
+      const v = Math.min(m, max);
+      // Find segment
+      let lo = S[0], hi = S[S.length - 1];
+      for (let j = 0; j < S.length - 1; j++) {
+        if (v >= S[j].t && v <= S[j + 1].t) { lo = S[j]; hi = S[j + 1]; break; }
       }
-      const d = editBrushRadius * 2;
-      editBrushCursor.style.width = d + 'px';
-      editBrushCursor.style.height = d + 'px';
-      if (e) {
-        const rect = document.getElementById('canvas-wrap').getBoundingClientRect();
-        editBrushCursor.style.left = (e.clientX - rect.left) + 'px';
-        editBrushCursor.style.top = (e.clientY - rect.top) + 'px';
+      const range = hi.t - lo.t;
+      const f = range > 1e-12 ? (v - lo.t) / range : 0;
+      return [
+        lo.r + (hi.r - lo.r) * f,
+        lo.g + (hi.g - lo.g) * f,
+        lo.b + (hi.b - lo.b) * f,
+      ];
+    }
+
+    /** Apply vertex-color heatmap to headMesh geometry. */
+    function _applyHeatmap(influence) {
+      if (!headMesh) return;
+      const stops = _computeHeatmapStops();
+      if (!stops) return;
+
+      const count = stops.mags.length;
+      const colors = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        const [r, g, b] = _heatColor(stops.mags[i], influence, stops);
+        colors[i * 3] = r;
+        colors[i * 3 + 1] = g;
+        colors[i * 3 + 2] = b;
+      }
+
+      if (editColorAttr) {
+        editColorAttr.array.set(colors);
+        editColorAttr.needsUpdate = true;
+      } else {
+        editColorAttr = new THREE.BufferAttribute(colors, 3);
+        headMesh.geometry.setAttribute('color', editColorAttr);
+      }
+
+      // Ensure vertex colors are enabled on material
+      const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
+      for (const mat of mats) {
+        if (!mat.vertexColors) { mat.vertexColors = true; mat.needsUpdate = true; }
       }
     }
+
+    /** Remove vertex color attribute, restore original material. */
+    function _removeHeatmap() {
+      if (!headMesh) return;
+      if (headMesh.geometry.attributes.color) {
+        headMesh.geometry.deleteAttribute('color');
+        editColorAttr = null;
+      }
+      const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
+      for (const mat of mats) {
+        mat.vertexColors = false;
+        mat.needsUpdate = true;
+      }
+    }
+
+    // ── Tool mode switching ──────────────────────────────────────────
+
+    function _setEditTool(mode) {
+      editToolMode = mode;
+      editSculptBtn.classList.toggle('active', mode === 'sculpt');
+      editPaintBtn.classList.toggle('active', mode === 'paint');
+      editEraseBtn.classList.toggle('active', mode === 'erase');
+    }
+    editSculptBtn.addEventListener('click', () => _setEditTool('sculpt'));
+    editPaintBtn.addEventListener('click', () => _setEditTool('paint'));
+    editEraseBtn.addEventListener('click', () => _setEditTool('erase'));
+    editPaintStrengthSlider.addEventListener('input', () => {
+      editPaintStrength = parseFloat(editPaintStrengthSlider.value);
+      editPaintStrengthValEl.textContent = editPaintStrength.toFixed(2);
+    });
+
+    // ── Paint brush: add morph influence ──────────────────────────────
+
+    function _paintAtPoint(hit, multiplier) {
+      if (!headMesh || editMorphIdx === null) return;
+      const posAttr = headMesh.geometry.attributes.position;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const localHit = headMesh.worldToLocal(hit.point.clone());
+
+      // Find reference delta direction+magnitude from nearby non-zero vertices
+      const searchRadius = editBrushRadius * 4;
+      const tmp = new THREE.Vector3();
+      let totalWeight = 0;
+      const avgDelta = new THREE.Vector3(0, 0, 0);
+
+      for (let i = 0; i < posAttr.count; i++) {
+        tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+        const dist = tmp.distanceTo(localHit);
+        if (dist > searchRadius) continue;
+        const dx = deltaAttr.getX(i), dy = deltaAttr.getY(i), dz = deltaAttr.getZ(i);
+        const mag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (mag < 1e-8) continue;
+        const w = 1 / (dist * dist + 0.0001);
+        avgDelta.x += dx * w;
+        avgDelta.y += dy * w;
+        avgDelta.z += dz * w;
+        totalWeight += w;
+      }
+
+      let paintDelta;
+      if (totalWeight > 0) {
+        avgDelta.divideScalar(totalWeight);
+        // Use direction from nearby deltas, but scale magnitude to morph's peak
+        avgDelta.normalize().multiplyScalar(editPeakMag);
+        paintDelta = avgDelta;
+      } else {
+        // Fall back to face normal, scaled to peak magnitude
+        paintDelta = new THREE.Vector3();
+        if (hit.face) {
+          paintDelta.copy(hit.face.normal);
+          paintDelta.transformDirection(new THREE.Matrix4().copy(headMesh.matrixWorld).invert());
+        } else {
+          paintDelta.set(0, 0, 1);
+        }
+        paintDelta.multiplyScalar(editPeakMag || 0.002);
+      }
+
+      // Apply with Gaussian falloff
+      const sigma = editBrushRadius * 0.5;
+      const sigma2x2 = 2 * sigma * sigma;
+      const strength = editPaintStrength * (multiplier || 1);
+
+      for (let i = 0; i < posAttr.count; i++) {
+        tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+        const dist = tmp.distanceTo(localHit);
+        if (dist > editBrushRadius) continue;
+        const falloff = Math.exp(-(dist * dist) / sigma2x2);
+        const s = strength * falloff;
+        deltaAttr.setXYZ(i,
+          deltaAttr.getX(i) + paintDelta.x * s,
+          deltaAttr.getY(i) + paintDelta.y * s,
+          deltaAttr.getZ(i) + paintDelta.z * s,
+        );
+      }
+      deltaAttr.needsUpdate = true;
+      if (editHeatmapOn) _applyHeatmap(parseFloat(editInfluenceSlider.value));
+    }
+
+    // ── Erase brush: reduce morph influence ──────────────────────────
+
+    function _eraseAtPoint(hit, multiplier) {
+      if (!headMesh || editMorphIdx === null) return;
+      const posAttr = headMesh.geometry.attributes.position;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const localHit = headMesh.worldToLocal(hit.point.clone());
+
+      const sigma = editBrushRadius * 0.5;
+      const sigma2x2 = 2 * sigma * sigma;
+      const strength = editPaintStrength * (multiplier || 1);
+      const tmp = new THREE.Vector3();
+
+      for (let i = 0; i < posAttr.count; i++) {
+        tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+        const dist = tmp.distanceTo(localHit);
+        if (dist > editBrushRadius) continue;
+        const falloff = Math.exp(-(dist * dist) / sigma2x2);
+        const s = 1 - strength * falloff;
+        deltaAttr.setXYZ(i,
+          deltaAttr.getX(i) * s,
+          deltaAttr.getY(i) * s,
+          deltaAttr.getZ(i) * s,
+        );
+      }
+      deltaAttr.needsUpdate = true;
+      if (editHeatmapOn) _applyHeatmap(parseFloat(editInfluenceSlider.value));
+    }
+
+    // ── Morph region overlay (hover preview) ─────────────────────────
+
+    function _showMorphRegionOverlay(idx) {
+      if (!headMesh || editMode) return;
+      const morphPositions = headMesh.geometry.morphAttributes.position || [];
+      const deltaAttr = morphPositions[idx];
+      if (!deltaAttr) return;
+
+      hoverOverlayIdx = idx;
+      const count = deltaAttr.count;
+
+      // Find max magnitude
+      let maxMag = 0;
+      for (let i = 0; i < count; i++) {
+        const dx = deltaAttr.getX(i), dy = deltaAttr.getY(i), dz = deltaAttr.getZ(i);
+        const mag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (mag > maxMag) maxMag = mag;
+      }
+      if (maxMag < 1e-8) return;
+
+      const colors = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        const dx = deltaAttr.getX(i), dy = deltaAttr.getY(i), dz = deltaAttr.getZ(i);
+        const mag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const t = mag / maxMag;
+        if (t < 0.01) {
+          colors[i * 3] = 0.1; colors[i * 3 + 1] = 0.1; colors[i * 3 + 2] = 0.15;
+        } else {
+          // Blue → orange → red
+          colors[i * 3]     = t > 0.5 ? 1.0 : t * 2;
+          colors[i * 3 + 1] = t > 0.5 ? 1.0 - (t - 0.5) * 2 : 0.3 * t;
+          colors[i * 3 + 2] = t < 0.3 ? 0.8 * (1 - t / 0.3) : 0;
+        }
+      }
+
+      const attr = new THREE.BufferAttribute(colors, 3);
+      headMesh.geometry.setAttribute('color', attr);
+      const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
+      for (const mat of mats) {
+        if (!mat._savedVertexColors) mat._savedVertexColors = mat.vertexColors;
+        mat.vertexColors = true;
+        mat.needsUpdate = true;
+      }
+    }
+
+    function _hideMorphRegionOverlay() {
+      if (!headMesh || hoverOverlayIdx === null) return;
+      hoverOverlayIdx = null;
+      headMesh.geometry.deleteAttribute('color');
+      const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
+      for (const mat of mats) {
+        mat.vertexColors = mat._savedVertexColors || false;
+        delete mat._savedVertexColors;
+        mat.needsUpdate = true;
+      }
+    }
+
+    // ── Enter / Exit edit mode ───────────────────────────────────────
 
     function _enterEditMode(idx, name) {
       if (editMode) _exitEditMode(false);
       if (!headMesh) return;
 
+      // Remove hover overlay if active
+      _hideMorphRegionOverlay();
+
       editMode = true;
       editMorphIdx = idx;
       editMorphName = name;
-      editSelectedVerts = new Set();
-      editHoveredVerts = new Set();
       editBsName.textContent = 'Editing: ' + name;
+
+      // Reset tool mode
+      _setEditTool('sculpt');
+      editPaintStrengthSlider.value = editPaintStrength;
+      editPaintStrengthValEl.textContent = editPaintStrength.toFixed(2);
 
       // Backup original deltas
       const deltaAttr = headMesh.geometry.morphAttributes.position[idx];
       editOriginalDeltas = new Float32Array(deltaAttr.array);
 
-      // Set morph influence to 1.0 and init the influence slider
+      // Cache peak delta magnitude for paint brush scaling
+      editPeakMag = 0;
+      for (let i = 0; i < deltaAttr.count; i++) {
+        const dx = deltaAttr.getX(i), dy = deltaAttr.getY(i), dz = deltaAttr.getZ(i);
+        const mag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (mag > editPeakMag) editPeakMag = mag;
+      }
+
+      // Set morph influence to 1.0
       if (currentAnimId) { cancelAnimationFrame(currentAnimId); currentAnimId = null; }
       headMesh.morphTargetInfluences.fill(0);
       headMesh.morphTargetInfluences[idx] = 1.0;
@@ -2378,8 +2422,10 @@
       if (activeSlider) activeSlider.value = 1;
       editInfluenceSlider.value = 1;
       editInfluenceVal.textContent = '1.00';
+      editMorphSlider.value = 0;
+      editMorphVal.textContent = '0.00';
 
-      // ── Make mesh fully opaque so it occludes back-face vertices ──
+      // Save and modify materials
       editOriginalMaterials = [];
       const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
       for (const mat of mats) {
@@ -2389,159 +2435,90 @@
           opacity: mat.opacity,
           depthWrite: mat.depthWrite,
           depthTest: mat.depthTest,
+          vertexColors: mat.vertexColors,
+          side: mat.side,
         });
         mat.transparent = false;
         mat.opacity = 1.0;
         mat.depthWrite = true;
         mat.depthTest = true;
+        mat.side = THREE.DoubleSide;
         mat.needsUpdate = true;
       }
 
-      // ── Create invisible occluder mesh for brush depth-testing ──
-      // Clone geometry so it has its own morph state; use invisible material.
-      const occluderMat = new THREE.MeshBasicMaterial({
-        visible: false, side: THREE.FrontSide,
-      });
-      editOccluderMesh = new THREE.Mesh(headMesh.geometry, occluderMat);
-      editOccluderMesh.morphTargetDictionary = headMesh.morphTargetDictionary;
-      editOccluderMesh.morphTargetInfluences = headMesh.morphTargetInfluences;
-      // Match the headMesh world transform so raycasts align
-      headMesh.parent.add(editOccluderMesh);
-      editOccluderMesh.position.copy(headMesh.position);
-      editOccluderMesh.rotation.copy(headMesh.rotation);
-      editOccluderMesh.scale.copy(headMesh.scale);
-      editOccluderMesh.updateMatrixWorld(true);
+      // Apply displacement heatmap
+      editHeatmapOn = true;
+      editHeatmapBtn.classList.add('active');
+      _applyHeatmap(1.0);
 
-      // Determine affected vertices
-      editAffectedSet = new Set();
-      for (let i = 0; i < deltaAttr.count; i++) {
-        if (deltaAttr.getX(i) !== 0 || deltaAttr.getY(i) !== 0 || deltaAttr.getZ(i) !== 0) {
-          editAffectedSet.add(i);
-        }
+      // Create brush sphere cursor
+      if (!editBrushMesh) {
+        const bGeo = new THREE.SphereGeometry(1, 16, 16);
+        const bMat = new THREE.MeshBasicMaterial({
+          color: 0x22c55e, transparent: true, opacity: 0.2, wireframe: true,
+        });
+        editBrushMesh = new THREE.Mesh(bGeo, bMat);
+        editBrushMesh.visible = false;
+        scene.add(editBrushMesh);
       }
+      editBrushMesh.scale.setScalar(editBrushRadius);
 
-      // ── Compute head bounding box from affected vertices ──
-      const baseAttr = headMesh.geometry.attributes.position;
-      const vertCount = baseAttr.count;
-      editHeadBBox = new THREE.Box3();
-      const tmpV = new THREE.Vector3();
-      for (const i of editAffectedSet) {
-        tmpV.set(baseAttr.getX(i), baseAttr.getY(i), baseAttr.getZ(i));
-        editHeadBBox.expandByPoint(tmpV);
-      }
-      // Expand 15% so "All" grabs a generous head region
-      const bboxPad = editHeadBBox.getSize(new THREE.Vector3()).multiplyScalar(0.15);
-      editHeadBBox.expandByVector(bboxPad);
-
-      // ── Pre-compute head vertex index set (vertices within head bbox) ──
-      editHeadVerts = new Set();
-      for (let i = 0; i < vertCount; i++) {
-        tmpV.set(baseAttr.getX(i), baseAttr.getY(i), baseAttr.getZ(i));
-        if (editHeadBBox.containsPoint(tmpV)) {
-          editHeadVerts.add(i);
-        }
-      }
-
-      // ── Pre-compute morphed triangle positions for occlusion worker ──
-      _buildOccluderTriangles();
-
-      // ── Create occlusion Web Worker ──
-      _initOcclusionWorker();
-
-      // ── Create Points overlay with per-vertex size + color ──
-      const positions = new Float32Array(vertCount * 3);
-      const colors    = new Float32Array(vertCount * 3);
-      const sizes     = new Float32Array(vertCount);
-
-      for (let i = 0; i < vertCount; i++) {
-        positions[i * 3]     = baseAttr.getX(i) + deltaAttr.getX(i);
-        positions[i * 3 + 1] = baseAttr.getY(i) + deltaAttr.getY(i);
-        positions[i * 3 + 2] = baseAttr.getZ(i) + deltaAttr.getZ(i);
-        // Default: light gray
-        colors[i * 3] = 0.75; colors[i * 3 + 1] = 0.75; colors[i * 3 + 2] = 0.78;
-        sizes[i] = 3.0;
-      }
-
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geo.setAttribute('aColor',   new THREE.BufferAttribute(colors, 3));
-      geo.setAttribute('aSize',    new THREE.BufferAttribute(sizes, 1));
-
-      const dpr = renderer.getPixelRatio();
-      const pointsMat = new THREE.ShaderMaterial({
-        uniforms: { uPixelRatio: { value: dpr } },
-        vertexShader: [
-          'uniform float uPixelRatio;',
-          'attribute float aSize;',
-          'attribute vec3 aColor;',
-          'varying vec3 vColor;',
-          'void main() {',
-          '  vColor = aColor;',
-          '  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);',
-          '  mvPos.z += 0.002;',  // slight bias toward camera so dots render above mesh
-          '  gl_PointSize = aSize * uPixelRatio;',
-          '  gl_Position = projectionMatrix * mvPos;',
-          '}',
-        ].join('\n'),
-        fragmentShader: [
-          'varying vec3 vColor;',
-          'void main() {',
-          '  vec2 c = gl_PointCoord - vec2(0.5);',
-          '  if (dot(c, c) > 0.25) discard;',
-          '  gl_FragColor = vec4(vColor, 0.9);',
-          '}',
-        ].join('\n'),
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-      });
-
-      editPointsMesh = new THREE.Points(geo, pointsMat);
-      editPointsMesh.renderOrder = 100;
-      editPointsMesh.frustumCulled = false;
-      headMesh.add(editPointsMesh);
+      // Init brush slider
+      editBrushSlider.value = editBrushRadius;
+      editBrushVal.textContent = editBrushRadius.toFixed(3) + 'm';
 
       // Show toolbar
       editToolbar.style.display = 'flex';
-      _setEditTool('select');
 
-      // Free LMB for editing, orbit on RMB
+      // Go full-screen
+      previewPanel.classList.add('fullscreen-edit');
+      // Trigger renderer resize
+      if (renderer) {
+        const wrap = document.getElementById('canvas-wrap');
+        const w = wrap.clientWidth, h = wrap.clientHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+
+      // LMB for editing, Option+LMB for orbit, RMB for pan
       controls.mouseButtons = {
         LEFT: null,
         MIDDLE: THREE.MOUSE.DOLLY,
-        RIGHT: THREE.MOUSE.ROTATE,
+        RIGHT: THREE.MOUSE.PAN,
       };
+
+      // Capture-phase listener: enable orbit on Option+LMB
+      canvasEl.addEventListener('pointerdown', _editAltSwitch, true);
 
       // Install pointer handlers
       canvasEl.addEventListener('pointerdown', _onEditPointerDown);
       canvasEl.addEventListener('pointermove', _onEditPointerMove);
       canvasEl.addEventListener('pointerup', _onEditPointerUp);
       canvasEl.addEventListener('pointercancel', _onEditPointerUp);
+      canvasEl.style.cursor = 'crosshair';
 
-      // Highlight active morph row and dim morph list while editing
+      // Highlight active morph row
       const activeRow = morphList.querySelector('.morph-row[data-idx="' + idx + '"]');
       if (activeRow) activeRow.classList.add('editing');
-      morphList.style.pointerEvents = 'none';
-      morphList.style.opacity = '0.5';
+      // Keep morph list visible but dim non-editing rows
+      morphList.style.opacity = '0.6';
     }
 
     async function _exitEditMode(save) {
       if (!editMode) return;
 
       if (!save && editOriginalDeltas && headMesh) {
-        // Restore original deltas
         const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
         deltaAttr.array.set(editOriginalDeltas);
         deltaAttr.needsUpdate = true;
       }
 
       if (save && headMesh) {
-        // ── Persist corrected morph target in memory ──
         const baseAttr = headMesh.geometry.attributes.position;
         const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
         const count = baseAttr.count;
 
-        // Compute corrected deltas and write as a new BufferAttribute
         const newDeltas = new Float32Array(count * 3);
         for (let i = 0; i < count; i++) {
           newDeltas[i * 3]     = deltaAttr.getX(i);
@@ -2549,54 +2526,45 @@
           newDeltas[i * 3 + 2] = deltaAttr.getZ(i);
         }
 
-        // Replace the old morph target completely (not layer on top)
         const newAttr = new THREE.Float32BufferAttribute(newDeltas, 3);
-        // Snapshot morph target names before patching (updateMorphTargets would nuke them)
         const morphNames = Object.keys(headMesh.morphTargetDictionary);
         headMesh.geometry.morphAttributes.position[editMorphIdx] = newAttr;
         headMesh.geometry.attributes.position.needsUpdate = true;
-        // Rebuild morphTargetDictionary from snapshot — do NOT call updateMorphTargets()
-        morphNames.forEach((name, i) => { headMesh.morphTargetDictionary[name] = i; });
+        morphNames.forEach((n, i) => { headMesh.morphTargetDictionary[n] = i; });
 
-        // Reset influence so mesh returns to neutral pose
         headMesh.morphTargetInfluences[editMorphIdx] = 0;
 
-        // Save correction to backend (binary)
         await _saveCorrection();
-
-        // Also write correction JSON locally
         await _saveCorrectionJSON(newDeltas, count);
-
-        // Show save confirmation toast
         _showEditToast('Correction saved — ' + editMorphName);
+        await _promptMirror(editMorphName, newDeltas, count);
       }
 
-      // ── Dispose occluder mesh ──
-      if (editOccluderMesh) {
-        if (editOccluderMesh.parent) editOccluderMesh.parent.remove(editOccluderMesh);
-        editOccluderMesh.material.dispose();
-        editOccluderMesh = null;
+      // Remove heatmap
+      _removeHeatmap();
+      editColorAttr = null;
+
+      // Remove brush mesh
+      if (editBrushMesh) {
+        scene.remove(editBrushMesh);
+        editBrushMesh.geometry.dispose();
+        editBrushMesh.material.dispose();
+        editBrushMesh = null;
       }
 
-      // ── Dispose points overlay ──
-      if (editPointsMesh) {
-        if (headMesh) headMesh.remove(editPointsMesh);
-        editPointsMesh.geometry.dispose();
-        editPointsMesh.material.dispose();
-        editPointsMesh = null;
-      }
-
-      // ── Restore original mesh material ──
+      // Restore original materials
       for (const saved of editOriginalMaterials) {
         saved.ref.transparent = saved.transparent;
         saved.ref.opacity     = saved.opacity;
         saved.ref.depthWrite  = saved.depthWrite;
         saved.ref.depthTest   = saved.depthTest;
+        saved.ref.vertexColors = saved.vertexColors;
+        saved.ref.side        = saved.side;
         saved.ref.needsUpdate = true;
       }
       editOriginalMaterials = [];
 
-      // Reset morph influence and influence slider
+      // Reset morph influence
       if (headMesh) {
         headMesh.morphTargetInfluences[editMorphIdx] = 0;
         const activeSlider = morphList.querySelector('.morph-row[data-idx="' + editMorphIdx + '"] .morph-slider');
@@ -2605,9 +2573,22 @@
       editInfluenceSlider.value = 0;
       editInfluenceVal.textContent = '0.00';
 
-      // Hide toolbar + brush cursor
+      // Hide toolbar
       editToolbar.style.display = 'none';
-      editBrushCursor.style.display = 'none';
+
+      // Exit full-screen
+      previewPanel.classList.remove('fullscreen-edit');
+      // Trigger renderer resize
+      if (renderer) {
+        const wrap = document.getElementById('canvas-wrap');
+        requestAnimationFrame(() => {
+          if (!renderer) return;
+          const w = wrap.clientWidth, h = wrap.clientHeight;
+          renderer.setSize(w, h, false);
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+        });
+      }
 
       // Restore orbit controls
       if (controls) {
@@ -2619,1341 +2600,256 @@
       }
 
       // Remove edit handlers
+      canvasEl.removeEventListener('pointerdown', _editAltSwitch, true);
       canvasEl.removeEventListener('pointerdown', _onEditPointerDown);
       canvasEl.removeEventListener('pointermove', _onEditPointerMove);
       canvasEl.removeEventListener('pointerup', _onEditPointerUp);
       canvasEl.removeEventListener('pointercancel', _onEditPointerUp);
       canvasEl.style.cursor = '';
 
-      // Re-enable morph list and remove editing highlight
+      // Re-enable morph list
       morphList.style.pointerEvents = '';
       morphList.style.opacity = '';
       document.querySelectorAll('.morph-row.editing').forEach(r => r.classList.remove('editing'));
 
-      // Rebuild morph list to update status indicators after save
       if (save) _buildMorphList();
 
       editMode = false;
       editMorphIdx = null;
       editMorphName = null;
       editOriginalDeltas = null;
-      editSelectedVerts = new Set();
-      editAffectedSet = new Set();
-      editHoveredVerts = new Set();
-      editHeadBBox = null;
-      editHeadVerts = null;
-      editOccluderTris = null;
-      brushUpdatePending = false;
-      brushPendingEvent = null;
+      editDragging = false;
+      editDragPivotIdx = null;
+      editDragOrigDeltas = null;
+      editDragStartWorld = null;
+      editDragStartScreen = null;
+      editPainting = false;
+      editToolModeOverride = null;
       if (occlusionWorker) { occlusionWorker.terminate(); occlusionWorker = null; }
     }
 
-    function _updateEditPointColors() {
-      if (!editPointsMesh) return;
-      const colAttr  = editPointsMesh.geometry.attributes.aColor;
-      const sizeAttr = editPointsMesh.geometry.attributes.aSize;
-      const count    = colAttr.count;
-      for (let i = 0; i < count; i++) {
-        if (editSelectedVerts.has(i)) {
-          // Bright blue #4488ff for active selection
-          colAttr.setXYZ(i, 0.267, 0.533, 1.0);
-          sizeAttr.setX(i, 6.0);
-        } else if (editHoveredVerts.has(i)) {
-          // Yellow hover #ffcc00
-          colAttr.setXYZ(i, 1.0, 0.8, 0.0);
-          sizeAttr.setX(i, 5.0);
-        } else if (editAffectedSet.has(i)) {
-          // Bright orange #ff6600 for already-edited vertices
-          colAttr.setXYZ(i, 1.0, 0.4, 0.0);
-          sizeAttr.setX(i, 4.5);
-        } else {
-          // Light gray
-          colAttr.setXYZ(i, 0.75, 0.75, 0.78);
-          sizeAttr.setX(i, 3.0);
-        }
-      }
-      colAttr.needsUpdate = true;
-      sizeAttr.needsUpdate = true;
-    }
-
-    function _updateEditPointPositions() {
-      if (!editPointsMesh || !headMesh) return;
-      const baseAttr = headMesh.geometry.attributes.position;
-      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
-      const ptAttr = editPointsMesh.geometry.attributes.position;
-      for (let i = 0; i < baseAttr.count; i++) {
-        ptAttr.setXYZ(i,
-          baseAttr.getX(i) + deltaAttr.getX(i),
-          baseAttr.getY(i) + deltaAttr.getY(i),
-          baseAttr.getZ(i) + deltaAttr.getZ(i),
-        );
-      }
-      ptAttr.needsUpdate = true;
-      editPointsMesh.geometry.computeBoundingSphere();
-    }
-
-    function _onEditPointerDown(e) {
-      if (e.button !== 0) return;
-      if (!editMode || !headMesh) return;
-
-      e.preventDefault();
-      editDragging = true;
-      editDragStarted = false;
-      editDragStartPos = new THREE.Vector2(e.clientX, e.clientY);
-      editLastScreenPos = new THREE.Vector2(e.clientX, e.clientY);
-      canvasEl.setPointerCapture(e.pointerId);
-
-      if (editTool === 'select') {
-        editDragStarted = true;  // select starts immediately
-        // Trigger brush select through the throttled RAF path
-        brushPendingEvent = { clientX: e.clientX, clientY: e.clientY };
-        brushPendingDrag = true;
-        brushPendingAddToSel = !e.shiftKey;
-        if (!brushUpdatePending) {
-          brushUpdatePending = true;
-          requestAnimationFrame(_executeBrushUpdate);
-        }
-      }
-      // Move mode: do NOT start drag or change cursor/colors until threshold exceeded
-    }
-
-    function _onEditPointerMove(e) {
-      if (!editMode) return;
-
-      if (editTool === 'select') {
-        _updateBrushCursor(e);
-        // Schedule throttled brush update via RAF
-        brushPendingEvent = { clientX: e.clientX, clientY: e.clientY };
-        brushPendingDrag = editDragging;
-        brushPendingAddToSel = !e.shiftKey;
-        if (!brushUpdatePending) {
-          brushUpdatePending = true;
-          requestAnimationFrame(_executeBrushUpdate);
-        }
-        return;
-      }
-
-      if (!editDragging) return;
-
-      if (editTool === 'move' && editSelectedVerts.size > 0) {
-        // Bug 2: drag threshold — only start after 3px movement
-        if (!editDragStarted) {
-          const tdx = e.clientX - editDragStartPos.x;
-          const tdy = e.clientY - editDragStartPos.y;
-          if (Math.sqrt(tdx * tdx + tdy * tdy) < 3) return;
-          editDragStarted = true;
-          canvasEl.style.cursor = 'grabbing';
-          // Bug 3: snapshot original delta positions at drag start
-          const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
-          editOrigVertPositions = new Map();
-          for (const i of editSelectedVerts) {
-            editOrigVertPositions.set(i, new THREE.Vector3(
-              deltaAttr.getX(i), deltaAttr.getY(i), deltaAttr.getZ(i)
-            ));
-          }
-        }
-        // Bug 3: compute total delta from drag start, apply to original positions
-        const dx = e.clientX - editDragStartPos.x;
-        const dy = e.clientY - editDragStartPos.y;
-        _moveSelectedVerts(dx, dy);
-      }
-    }
-
-    function _executeBrushUpdate() {
-      brushUpdatePending = false;
-      if (!editMode || !brushPendingEvent) return;
-      const ev = brushPendingEvent;
-      const isDrag = brushPendingDrag;
-      const addToSel = brushPendingAddToSel;
-      brushPendingEvent = null;
-
-      // Get 2D screen-space candidates (cheap)
-      const candidates = _screenSpaceCandidates(ev);
-
-      if (candidates.length === 0) {
-        editHoveredVerts = new Set();
-        _updateEditPointColors();
-        return;
-      }
-
-      if (candidates.length <= 100) {
-        // Occlusion test on main thread — fast enough for <100 candidates
-        const visible = _occlusionTestSync(candidates);
-        if (isDrag) {
-          _applyBrushSelect(visible, addToSel);
-        } else {
-          editHoveredVerts = visible;
-          _updateEditPointColors();
-        }
-      } else if (occlusionWorker) {
-        // Offload to Web Worker
-        const camPos = camera.position;
-        const candData = new Float32Array(candidates.length * 4);
-        for (let i = 0; i < candidates.length; i++) {
-          candData[i * 4]     = candidates[i].idx;
-          candData[i * 4 + 1] = candidates[i].worldPos.x;
-          candData[i * 4 + 2] = candidates[i].worldPos.y;
-          candData[i * 4 + 3] = candidates[i].worldPos.z;
-        }
-        occlusionWorker.postMessage({
-          candData: candData.buffer,
-          camPos: [camPos.x, camPos.y, camPos.z],
-          isDrag,
-          addToSel,
-        }, [candData.buffer]);
-      } else {
-        // Fallback: main thread
-        const visible = _occlusionTestSync(candidates);
-        if (isDrag) {
-          _applyBrushSelect(visible, addToSel);
-        } else {
-          editHoveredVerts = visible;
-          _updateEditPointColors();
-        }
-      }
-    }
-
-    function _onEditPointerUp(e) {
-      if (!editDragging) return;
-      const wasMoveToolDrag = editTool === 'move' && editDragStarted && editSelectedVerts.size > 0;
-      editDragging = false;
-      editDragStarted = false;
-      editDragStartPos = null;
-      editLastScreenPos = null;
-      editOrigVertPositions = null;
-      if (editTool === 'move') canvasEl.style.cursor = 'grab';
-      try { canvasEl.releasePointerCapture(e.pointerId); } catch (_) {}
-
-      if (wasMoveToolDrag && editPointsMesh) {
-        // Track which vertices have been displaced
-        const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
-        for (const i of editSelectedVerts) {
-          if (deltaAttr.getX(i) !== 0 || deltaAttr.getY(i) !== 0 || deltaAttr.getZ(i) !== 0) {
-            editAffectedSet.add(i);
-          }
-        }
-        // Refresh point positions and colors to reflect post-move state
-        _updateEditPointPositions();
-        _updateEditPointColors();
-      }
-    }
-
-    /** Return candidate vertices whose screen projection falls inside the brush.
-     *  Only checks head vertices (pre-computed set). Returns array of {idx, worldPos}. */
-    function _screenSpaceCandidates(e) {
-      if (!headMesh || editMorphIdx === null) return [];
-
-      const rect = canvasEl.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      const rSq = editBrushRadius * editBrushRadius;
-
-      const baseAttr = headMesh.geometry.attributes.position;
-      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
-
-      const mvp = new THREE.Matrix4()
-        .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
-        .multiply(headMesh.matrixWorld);
-
-      const w = rect.width, h = rect.height;
-      const v4 = new THREE.Vector4();
-      const candidates = [];
-      const meshWorld = headMesh.matrixWorld;
-      const localPos = new THREE.Vector3();
-
-      // Only iterate head vertices, not the full mesh
-      const vertexSet = editHeadVerts || new Set();
-      for (const i of vertexSet) {
-        v4.set(
-          baseAttr.getX(i) + deltaAttr.getX(i),
-          baseAttr.getY(i) + deltaAttr.getY(i),
-          baseAttr.getZ(i) + deltaAttr.getZ(i),
-          1.0,
-        );
-        v4.applyMatrix4(mvp);
-        if (v4.w <= 0) continue;
-        const invW = 1.0 / v4.w;
-        const sx = (v4.x * invW + 1) * 0.5 * w;
-        const sy = (-v4.y * invW + 1) * 0.5 * h;
-        const dx = sx - mouseX;
-        const dy = sy - mouseY;
-        if (dx * dx + dy * dy <= rSq) {
-          localPos.set(
-            baseAttr.getX(i) + deltaAttr.getX(i),
-            baseAttr.getY(i) + deltaAttr.getY(i),
-            baseAttr.getZ(i) + deltaAttr.getZ(i),
-          );
-          const wp = localPos.clone().applyMatrix4(meshWorld);
-          candidates.push({ idx: i, worldPos: wp });
-        }
-      }
-      return candidates;
-    }
-
-    /** Synchronous occlusion test for small candidate sets. Returns Set of visible vertex indices. */
-    function _occlusionTestSync(candidates) {
-      const result = new Set();
-      if (candidates.length === 0) return result;
-
-      const occluder = editOccluderMesh || headMesh;
-      const rc = new THREE.Raycaster();
-      const camPos = camera.position;
-      const EPSILON = 0.01;
-
-      for (const c of candidates) {
-        const dir = c.worldPos.clone().sub(camPos).normalize();
-        const vertDist = c.worldPos.distanceTo(camPos);
-        rc.set(camPos, dir);
-        rc.far = vertDist + EPSILON;
-        const hits = rc.intersectObject(occluder, false);
-        if (hits.length === 0 || hits[0].distance >= vertDist - EPSILON) {
-          result.add(c.idx);
-        }
-      }
-      return result;
-    }
-
-    /** Apply brush selection from a set of visible vertex indices. */
-    function _applyBrushSelect(visible, addToSelection) {
-      let changed = false;
-      for (const i of visible) {
-        if (addToSelection) {
-          if (!editSelectedVerts.has(i)) { editSelectedVerts.add(i); changed = true; }
-        } else {
-          if (editSelectedVerts.has(i)) { editSelectedVerts.delete(i); changed = true; }
-        }
-      }
-      editHoveredVerts = new Set();
-      if (changed) _updateEditPointColors();
-    }
-
-    /** Build flat Float32Array of morphed triangle vertex positions for the occlusion worker. */
-    function _buildOccluderTriangles() {
-      if (!headMesh) return;
-      const geo = headMesh.geometry;
-      const baseAttr = geo.attributes.position;
-      const deltaAttr = geo.morphAttributes.position[editMorphIdx];
-      const index = geo.index;
-      const meshWorld = headMesh.matrixWorld;
-      const tmp = new THREE.Vector3();
-
-      const faceCount = index ? index.count / 3 : baseAttr.count / 3;
-      editOccluderTris = new Float32Array(faceCount * 9);
-
-      for (let f = 0; f < faceCount; f++) {
-        for (let v = 0; v < 3; v++) {
-          const vi = index ? index.getX(f * 3 + v) : f * 3 + v;
-          tmp.set(
-            baseAttr.getX(vi) + deltaAttr.getX(vi),
-            baseAttr.getY(vi) + deltaAttr.getY(vi),
-            baseAttr.getZ(vi) + deltaAttr.getZ(vi),
-          );
-          tmp.applyMatrix4(meshWorld);
-          const off = f * 9 + v * 3;
-          editOccluderTris[off]     = tmp.x;
-          editOccluderTris[off + 1] = tmp.y;
-          editOccluderTris[off + 2] = tmp.z;
-        }
-      }
-    }
-
-    /** Initialize the occlusion Web Worker with inline code. */
-    function _initOcclusionWorker() {
-      const src = `
-        let tris = null;
-        let triCount = 0;
-
-        self.onmessage = function(msg) {
-          const d = msg.data;
-
-          // Init message: store triangle data once
-          if (d.type === 'init') {
-            tris = new Float32Array(d.triangles);
-            triCount = d.triCount;
-            return;
-          }
-
-          // Test message: run occlusion against stored triangles
-          const cand = new Float32Array(d.candData);
-          const camX = d.camPos[0], camY = d.camPos[1], camZ = d.camPos[2];
-          const EPSILON = 0.01;
-          const visible = [];
-
-          for (let ci = 0; ci < cand.length; ci += 4) {
-            const idx = cand[ci];
-            const wx = cand[ci+1], wy = cand[ci+2], wz = cand[ci+3];
-            const dirX = wx - camX, dirY = wy - camY, dirZ = wz - camZ;
-            const vertDist = Math.sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ);
-            const invDist = 1.0 / vertDist;
-            const dx = dirX * invDist, dy = dirY * invDist, dz = dirZ * invDist;
-            let blocked = false;
-
-            for (let t = 0; t < triCount; t++) {
-              const ti = t * 9;
-              const v0x = tris[ti], v0y = tris[ti+1], v0z = tris[ti+2];
-              const e1x = tris[ti+3]-v0x, e1y = tris[ti+4]-v0y, e1z = tris[ti+5]-v0z;
-              const e2x = tris[ti+6]-v0x, e2y = tris[ti+7]-v0y, e2z = tris[ti+8]-v0z;
-              const px = dy*e2z - dz*e2y, py = dz*e2x - dx*e2z, pz = dx*e2y - dy*e2x;
-              const det = e1x*px + e1y*py + e1z*pz;
-              if (det > -1e-8 && det < 1e-8) continue;
-              const invDet = 1.0 / det;
-              const tx = camX-v0x, ty = camY-v0y, tz = camZ-v0z;
-              const u = (tx*px + ty*py + tz*pz) * invDet;
-              if (u < 0 || u > 1) continue;
-              const qx = ty*e1z - tz*e1y, qy = tz*e1x - tx*e1z, qz = tx*e1y - ty*e1x;
-              const v = (dx*qx + dy*qy + dz*qz) * invDet;
-              if (v < 0 || u + v > 1) continue;
-              const hitT = (e2x*qx + e2y*qy + e2z*qz) * invDet;
-              if (hitT > 1e-8 && hitT < vertDist - EPSILON) { blocked = true; break; }
-            }
-            if (!blocked) visible.push(idx);
-          }
-
-          self.postMessage({ visible, isDrag: d.isDrag, addToSel: d.addToSel });
-        };
-      `;
-      const blob = new Blob([src], { type: 'application/javascript' });
-      occlusionWorker = new Worker(URL.createObjectURL(blob));
-
-      // Send triangle data once at init (transferred, not copied)
-      const triCopy = editOccluderTris.slice();
-      occlusionWorker.postMessage({
-        type: 'init',
-        triangles: triCopy.buffer,
-        triCount: triCopy.length / 9,
-      }, [triCopy.buffer]);
-
-      occlusionWorker.onmessage = function(msg) {
-        const { visible, isDrag, addToSel } = msg.data;
-        const visSet = new Set(visible.map(v => Math.round(v)));
-        if (isDrag) {
-          _applyBrushSelect(visSet, addToSel);
-        } else {
-          editHoveredVerts = visSet;
-          _updateEditPointColors();
-        }
-      };
-    }
-
-    function _moveSelectedVerts(dxPx, dyPx) {
-      if (editSelectedVerts.size === 0 || !headMesh || !editOrigVertPositions) return;
-
-      // Average depth of selected vertices (camera space) using original positions
-      const baseAttr = headMesh.geometry.attributes.position;
-      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
-      const camInv = camera.matrixWorldInverse;
-      const meshWorld = headMesh.matrixWorld;
-      const combined = new THREE.Matrix4().multiplyMatrices(camInv, meshWorld);
-      const tmp = new THREE.Vector3();
-      let avgDepth = 0;
-
-      for (const i of editSelectedVerts) {
-        const orig = editOrigVertPositions.get(i);
-        tmp.set(
-          baseAttr.getX(i) + orig.x,
-          baseAttr.getY(i) + orig.y,
-          baseAttr.getZ(i) + orig.z,
-        );
-        tmp.applyMatrix4(combined);
-        avgDepth += -tmp.z;
-      }
-      avgDepth /= editSelectedVerts.size;
-
-      // Convert total pixel delta from drag start to world delta
-      const rect = canvasEl.getBoundingClientRect();
-      const fovRad = camera.fov * Math.PI / 180;
-      const pixelToWorld = 2 * avgDepth * Math.tan(fovRad / 2) / rect.height;
-
-      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
-      const worldDelta = right.multiplyScalar(dxPx * pixelToWorld)
-        .add(up.multiplyScalar(-dyPx * pixelToWorld));
-
-      // Convert world delta to headMesh local space
-      const invMat = new THREE.Matrix4().copy(headMesh.matrixWorld).invert();
-      const localDelta = worldDelta.transformDirection(invMat);
-
-      // Apply total delta to ORIGINAL positions (not accumulated) to prevent drift
-      for (const i of editSelectedVerts) {
-        const orig = editOrigVertPositions.get(i);
-        deltaAttr.setXYZ(i,
-          orig.x + localDelta.x,
-          orig.y + localDelta.y,
-          orig.z + localDelta.z,
-        );
-      }
-      deltaAttr.needsUpdate = true;
-
-      // Update point overlay and show moved verts prominently
-      _updateEditPointPositions();
-      if (editPointsMesh) {
-        editPointsMesh.visible = true;  // ensure never hidden during drag
-        const colAttr = editPointsMesh.geometry.attributes.aColor;
-        const sizeAttr = editPointsMesh.geometry.attributes.aSize;
-        for (const i of editSelectedVerts) {
-          // Bright cyan #00ddff while dragging — very visible
-          colAttr.setXYZ(i, 0.0, 0.87, 1.0);
-          sizeAttr.setX(i, 8.0);
-        }
-        colAttr.needsUpdate = true;
-        sizeAttr.needsUpdate = true;
-      }
-    }
-
-    // ══════════════════════════════════════════════════════════════════
-    // ── Region-based morph correction editor (5-step wizard) ─────────
-    // ══════════════════════════════════════════════════════════════════
-
-    const REGION_LABELS = [
-      'left_eye','right_eye','nose','mouth','left_brow',
-      'right_brow','forehead','left_cheek','right_cheek','jaw',
-    ];
-
-    // DOM refs
-    const rcPanel          = document.getElementById('rc-panel');
-    const rcStepIndicator  = document.getElementById('rc-step-indicator');
-    const rcBody           = document.getElementById('rc-body');
-    const rcStep1          = document.getElementById('rc-step1');
-    const rcStep2          = document.getElementById('rc-step2');
-    const rcStep3          = document.getElementById('rc-step3');
-    const rcStep4          = document.getElementById('rc-step4');
-    const rcStep5          = document.getElementById('rc-step5');
-    const rcRegionTitle    = document.getElementById('rc-region-title');
-    const rcVertCount      = document.getElementById('rc-vert-count');
-    const rcPreviewSlider  = document.getElementById('rc-preview-slider');
-    const rcPreviewVal     = document.getElementById('rc-preview-val');
-    const rcRegionDropdown = document.getElementById('rc-region-dropdown');
-    const rcBrushSize      = document.getElementById('rc-brush-size');
-    const rcBrushSizeVal   = document.getElementById('rc-brush-size-val');
-    const rcDragMagnitude  = document.getElementById('rc-drag-magnitude');
-    const rcMirrorBox      = document.getElementById('rc-mirror-box');
-    const rcMirrorLabel    = document.getElementById('rc-mirror-label');
-    const rcBrushIndicator = document.getElementById('rc-brush-sphere-indicator');
-
-    // State
-    let rcActive = false;
-    let rcStep = 1;
-    let rcBsName = null;
-    let rcBsIdx = null;
-    let rcRegionData = null;       // from /region-vertices
-    let rcSelectedVerts = new Set();
-    let rcCentroid = new THREE.Vector3();
-    let rcCentroidSphere = null;
-    let rcTransformCtrl = null;
-    let rcGizmoTarget = null;      // dummy object at centroid
-    let rcOriginalDeltas = null;   // Float32Array backup
-    let rcCorrectedDeltas = null;  // Float32Array working copy
-    let rcRegionRadius = 0.02;
-    let rcBrushModeAdd = true;
-    let rcBrushRad = 0.025;        // metres
-    let rcPaintActive = false;
-    let rcPainting = false;
-    let rcRaycaster = new THREE.Raycaster();
-    let rcBrushMesh = null;        // translucent sphere on cursor
-    let rcPreviewOn = false;
-    let rcMirrorApplied = false;
-    let rcMirrorCorrected = null;  // Float32Array for mirrored bs
-    let rcOrigMaterials = [];
-    let rcColorAttr = null;
-    let rcGizmoStartPos = null;
-
-    // ── Step transition ──────────────────────────────────────────────
-
-    function _rcSetStep(step) {
-      rcStep = step;
-      [rcStep1, rcStep2, rcStep3, rcStep4, rcStep5].forEach((el, i) => {
-        el.style.display = (i + 1 === step) ? '' : 'none';
-      });
-      rcStepIndicator.querySelectorAll('.rc-step-tab').forEach(tab => {
-        const s = parseInt(tab.dataset.step);
-        tab.classList.toggle('active', s === step);
-        tab.classList.toggle('completed', s < step);
-      });
-    }
-
-    // Allow clicking completed steps to go back
-    rcStepIndicator.addEventListener('click', e => {
-      const tab = e.target.closest('.rc-step-tab');
-      if (!tab || !tab.classList.contains('completed')) return;
-      const s = parseInt(tab.dataset.step);
-      if (s === 4) _rcSetupStep4();
-      _rcSetStep(s);
-    });
-
-    // ── Open the editor ──────────────────────────────────────────────
-
-    async function _rcOpen(idx, name) {
-      if (rcActive) _rcClose(false);
-      if (editMode) _exitEditMode(false);
-      if (!headMesh || !currentRigId) return;
-
-      rcActive = true;
-      rcBsIdx = idx;
-      rcBsName = name;
-      rcMirrorApplied = false;
-      rcMirrorCorrected = null;
-      rcPreviewOn = false;
-
-      // Save original deltas
-      const deltaAttr = headMesh.geometry.morphAttributes.position[idx];
-      rcOriginalDeltas = new Float32Array(deltaAttr.array);
-
-      // Reset morphs
-      if (currentAnimId) { cancelAnimationFrame(currentAnimId); currentAnimId = null; }
-      headMesh.morphTargetInfluences.fill(0);
-      document.querySelectorAll('.morph-slider').forEach(s => { s.value = 0; });
-
-      // Switch panels
-      document.getElementById('morph-panel').style.display = 'none';
-      rcPanel.style.display = 'flex';
-      document.getElementById('preview-panel').classList.add('rc-active');
-
-      // Save original materials and make mesh opaque
-      rcOrigMaterials = [];
-      const mats = Array.isArray(headMesh.material) ? headMesh.material : [headMesh.material];
-      for (const mat of mats) {
-        rcOrigMaterials.push({
-          ref: mat, vertexColors: mat.vertexColors,
-          transparent: mat.transparent, opacity: mat.opacity,
-        });
-        mat.vertexColors = true;
-        mat.transparent = false;
-        mat.opacity = 1.0;
-        mat.needsUpdate = true;
-      }
-
-      _rcSetStep(1);
-      rcRegionTitle.textContent = name;
-      rcVertCount.textContent = '...';
-
-      // Fetch region data
-      try {
-        const resp = await fetch(`/region-vertices/${currentRigId}?blendshape=${encodeURIComponent(name)}`);
-        if (!resp.ok) {
-          rcRegionTitle.textContent = 'Region data unavailable';
-          rcVertCount.textContent = '';
-          return;
-        }
-        rcRegionData = await resp.json();
-      } catch (err) {
-        console.error('Failed to fetch region vertices:', err);
-        return;
-      }
-
-      // Build selected vertex set from region data
-      rcSelectedVerts = new Set(rcRegionData.affected_vertex_indices);
-      rcVertCount.textContent = rcSelectedVerts.size + ' verts';
-      rcRegionTitle.textContent = rcRegionData.region_label + ' — ' + name;
-      rcRegionDropdown.value = rcRegionData.region_index;
-
-      // Apply vertex colors
-      _rcApplyVertexColors();
-
-      // Add centroid sphere
-      _rcComputeCentroid();
-      _rcAddCentroidSphere();
-
-      // Auto-advance to step 2 after a brief pause
-      setTimeout(() => { if (rcActive) _rcSetStep(2); _rcAutoScrub(); }, 600);
-    }
-
-    // ── Vertex coloring ──────────────────────────────────────────────
-
-    function _rcApplyVertexColors() {
-      if (!headMesh) return;
-      const geo = headMesh.geometry;
-      const count = geo.attributes.position.count;
-      const colors = new Float32Array(count * 3);
-
-      for (let i = 0; i < count; i++) {
-        if (rcSelectedVerts.has(i)) {
-          // Orange #FF6B35
-          colors[i*3] = 1.0; colors[i*3+1] = 0.42; colors[i*3+2] = 0.21;
-        } else {
-          // Dark grey #2A2A2A
-          colors[i*3] = 0.165; colors[i*3+1] = 0.165; colors[i*3+2] = 0.165;
-        }
-      }
-
-      if (rcColorAttr) {
-        rcColorAttr.array.set(colors);
-        rcColorAttr.needsUpdate = true;
-      } else {
-        rcColorAttr = new THREE.BufferAttribute(colors, 3);
-        geo.setAttribute('color', rcColorAttr);
-      }
-    }
-
-    function _rcApplyGreenFlash() {
-      if (!headMesh || !rcColorAttr) return;
-      const count = headMesh.geometry.attributes.position.count;
-      for (let i = 0; i < count; i++) {
-        if (rcSelectedVerts.has(i)) {
-          rcColorAttr.setXYZ(i, 0.13, 0.77, 0.37);  // #22c55e
-        }
-      }
-      rcColorAttr.needsUpdate = true;
-    }
-
-    // ── Centroid ─────────────────────────────────────────────────────
-
-    function _rcComputeCentroid() {
-      if (!headMesh) return;
+    // ── Direct mesh drag correction ──────────────────────────────────
+
+    /** Find nearest vertex index to a world-space hit point. */
+    function _nearestVertexIdx(hitPoint) {
+      if (!headMesh) return -1;
+      const localPt = headMesh.worldToLocal(hitPoint.clone());
       const posAttr = headMesh.geometry.attributes.position;
-      rcCentroid.set(0, 0, 0);
-      let n = 0;
-      for (const vi of rcSelectedVerts) {
-        rcCentroid.x += posAttr.getX(vi);
-        rcCentroid.y += posAttr.getY(vi);
-        rcCentroid.z += posAttr.getZ(vi);
-        n++;
-      }
-      if (n > 0) rcCentroid.divideScalar(n);
-
-      // Compute region radius: mean distance from centroid
-      let sumDist = 0;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const influence = parseFloat(editInfluenceSlider.value);
+      let bestIdx = -1, bestDist2 = Infinity;
       const tmp = new THREE.Vector3();
-      for (const vi of rcSelectedVerts) {
-        tmp.set(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi));
-        sumDist += tmp.distanceTo(rcCentroid);
+      for (let i = 0; i < posAttr.count; i++) {
+        tmp.set(
+          posAttr.getX(i) + deltaAttr.getX(i) * influence,
+          posAttr.getY(i) + deltaAttr.getY(i) * influence,
+          posAttr.getZ(i) + deltaAttr.getZ(i) * influence,
+        );
+        const d2 = tmp.distanceToSquared(localPt);
+        if (d2 < bestDist2) { bestDist2 = d2; bestIdx = i; }
       }
-      rcRegionRadius = n > 0 ? sumDist / n : 0.02;
+      return bestIdx;
     }
 
-    function _rcAddCentroidSphere() {
-      _rcRemoveCentroidSphere();
-      const geo = new THREE.SphereGeometry(0.004, 16, 16);
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.35,
-      });
-      rcCentroidSphere = new THREE.Mesh(geo, mat);
-      // Transform centroid to world space
-      const worldCentroid = rcCentroid.clone();
-      if (headMesh) headMesh.localToWorld(worldCentroid);
-      rcCentroidSphere.position.copy(worldCentroid);
-      scene.add(rcCentroidSphere);
-    }
-
-    function _rcRemoveCentroidSphere() {
-      if (rcCentroidSphere) {
-        scene.remove(rcCentroidSphere);
-        rcCentroidSphere.geometry.dispose();
-        rcCentroidSphere.material.dispose();
-        rcCentroidSphere = null;
-      }
-    }
-
-    // ── Step 2: Auto-scrub preview ──────────────────────────────────
-
-    function _rcAutoScrub() {
-      if (!headMesh || !rcActive) return;
-      const duration = 500;
-      const start = performance.now();
-      headMesh.morphTargetInfluences[rcBsIdx] = 0;
-
-      function step(now) {
-        if (!rcActive || rcStep !== 2) return;
-        const t = Math.min((now - start) / duration, 1.0);
-        const val = t;
-        headMesh.morphTargetInfluences[rcBsIdx] = val;
-        rcPreviewSlider.value = val;
-        rcPreviewVal.textContent = val.toFixed(2);
-        if (t < 1.0) requestAnimationFrame(step);
-      }
-      requestAnimationFrame(step);
-    }
-
-    rcPreviewSlider.addEventListener('input', () => {
-      if (!headMesh || !rcActive) return;
-      const v = parseFloat(rcPreviewSlider.value);
-      headMesh.morphTargetInfluences[rcBsIdx] = v;
-      rcPreviewVal.textContent = v.toFixed(2);
-    });
-
-    document.getElementById('rc-skip-to-save').addEventListener('click', () => {
-      if (!rcActive) return;
-      _rcSetStep(5);
-      _rcSetupStep5();
-    });
-
-    document.getElementById('rc-edit-morph').addEventListener('click', () => {
-      if (!rcActive) return;
-      headMesh.morphTargetInfluences[rcBsIdx] = 0;
-      _rcSetStep(3);
-      _rcSetupStep3();
-    });
-
-    // ── Step 3: Fix Region (paint mode) ──────────────────────────────
-
-    function _rcSetupStep3() {
-      headMesh.morphTargetInfluences[rcBsIdx] = 0;
-      rcPaintActive = true;
-      rcBrushModeAdd = true;
-      document.getElementById('rc-brush-add').classList.add('add-active');
-      document.getElementById('rc-brush-remove').classList.remove('remove-active');
-      _rcUpdateBrushSize();
-
-      // Create brush sphere visualization
-      if (!rcBrushMesh) {
-        const bGeo = new THREE.SphereGeometry(1, 16, 16);
-        const bMat = new THREE.MeshBasicMaterial({
-          color: 0x22c55e, transparent: true, opacity: 0.15, wireframe: true,
-        });
-        rcBrushMesh = new THREE.Mesh(bGeo, bMat);
-        rcBrushMesh.visible = false;
-        scene.add(rcBrushMesh);
-      }
-
-      // Orbit on Ctrl+drag only during paint
-      controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null };
-      canvasEl.addEventListener('pointerdown', _rcPaintDown);
-      canvasEl.addEventListener('pointermove', _rcPaintMove);
-      canvasEl.addEventListener('pointerup', _rcPaintUp);
-      canvasEl.addEventListener('contextmenu', e => e.preventDefault());
-      canvasEl.style.cursor = 'crosshair';
-
-      // Ctrl+drag for orbit
-      canvasEl.addEventListener('pointerdown', _rcCtrlOrbitDown);
-    }
-
-    let _rcCtrlDragging = false;
-    function _rcCtrlOrbitDown(e) {
-      if (!e.ctrlKey && !e.metaKey) return;
-      _rcCtrlDragging = true;
-      controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-    }
-    window.addEventListener('pointerup', () => {
-      if (_rcCtrlDragging) {
-        _rcCtrlDragging = false;
-        if (rcPaintActive) {
-          controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null };
-        }
-      }
-    });
-
-    function _rcTeardownStep3() {
-      rcPaintActive = false;
-      rcPainting = false;
-      canvasEl.removeEventListener('pointerdown', _rcPaintDown);
-      canvasEl.removeEventListener('pointermove', _rcPaintMove);
-      canvasEl.removeEventListener('pointerup', _rcPaintUp);
-      canvasEl.removeEventListener('pointerdown', _rcCtrlOrbitDown);
-      canvasEl.style.cursor = '';
-      if (rcBrushMesh) {
-        rcBrushMesh.visible = false;
-      }
-      controls.mouseButtons = {
-        LEFT: THREE.MOUSE.ROTATE,
-        MIDDLE: THREE.MOUSE.DOLLY,
-        RIGHT: THREE.MOUSE.PAN,
-      };
-    }
-
-    function _rcUpdateBrushSize() {
-      // Map slider 0-100 to 0.01 - 0.05 metres
-      const t = parseInt(rcBrushSize.value) / 100;
-      rcBrushRad = 0.01 + t * 0.04;
-      rcBrushSizeVal.textContent = rcBrushRad.toFixed(3) + 'm';
-      if (rcBrushMesh) rcBrushMesh.scale.setScalar(rcBrushRad);
-    }
-    rcBrushSize.addEventListener('input', _rcUpdateBrushSize);
-
-    document.getElementById('rc-brush-add').addEventListener('click', () => {
-      rcBrushModeAdd = true;
-      document.getElementById('rc-brush-add').classList.add('add-active');
-      document.getElementById('rc-brush-remove').classList.remove('remove-active');
-      if (rcBrushMesh) rcBrushMesh.material.color.setHex(0x22c55e);
-    });
-    document.getElementById('rc-brush-remove').addEventListener('click', () => {
-      rcBrushModeAdd = false;
-      document.getElementById('rc-brush-remove').classList.add('remove-active');
-      document.getElementById('rc-brush-add').classList.remove('add-active');
-      if (rcBrushMesh) rcBrushMesh.material.color.setHex(0xef4444);
-    });
-
-    function _rcRaycastMesh(e) {
-      if (!headMesh || !renderer) return null;
+    /** Raycast the edit canvas against headMesh. */
+    function _editRaycast(e) {
       const rect = canvasEl.getBoundingClientRect();
       const mouse = new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
         -((e.clientY - rect.top) / rect.height) * 2 + 1,
       );
-      rcRaycaster.setFromCamera(mouse, camera);
-      const hits = rcRaycaster.intersectObject(headMesh, false);
+      editRaycaster.setFromCamera(mouse, camera);
+      const hits = editRaycaster.intersectObject(headMesh, false);
       return hits.length > 0 ? hits[0] : null;
     }
 
-    function _rcPaintAt(hit) {
-      if (!hit || !headMesh) return;
-      const hitPosLocal = headMesh.worldToLocal(hit.point.clone());
+    function _editAltSwitch(e) {
+      if (!editMode) return;
+      if (e.button === 0) {
+        controls.mouseButtons.LEFT = e.altKey ? THREE.MOUSE.ROTATE : null;
+      }
+      // macOS Ctrl+click fires as button 2; suppress pan so erase mode works
+      if (e.button === 2 && e.ctrlKey) {
+        controls.mouseButtons.RIGHT = null;
+      } else if (e.button === 2) {
+        controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+      }
+    }
+
+    function _onEditPointerDown(e) {
+      if (!editMode || !headMesh) return;
+      if (e.altKey) return;
+
+      // Determine effective tool: Ctrl+click always erases
+      const effectiveTool = (e.ctrlKey && (e.button === 0 || e.button === 2))
+        ? 'erase' : editToolMode;
+
+      if (e.button !== 0 && !(e.button === 2 && e.ctrlKey)) return;
+      e.preventDefault();
+
+      const hit = _editRaycast(e);
+      if (!hit) return;
+
+      if (effectiveTool === 'paint') {
+        _paintAtPoint(hit, 1);
+        editPainting = true;
+        editToolModeOverride = 'paint';
+        canvasEl.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      if (effectiveTool === 'erase') {
+        _eraseAtPoint(hit, 1);
+        editPainting = true;
+        editToolModeOverride = 'erase';
+        canvasEl.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      // Sculpt mode: drag to move vertices
+      const pivotIdx = _nearestVertexIdx(hit.point);
+      if (pivotIdx < 0) return;
+
+      editDragging = true;
+      editDragPivotIdx = pivotIdx;
+      editDragStartWorld = hit.point.clone();
+      editDragStartScreen = new THREE.Vector2(e.clientX, e.clientY);
+      canvasEl.setPointerCapture(e.pointerId);
+      canvasEl.style.cursor = 'grabbing';
+
+      // Snapshot deltas for all vertices within brush radius
       const posAttr = headMesh.geometry.attributes.position;
-      const count = posAttr.count;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+      const pivotLocal = new THREE.Vector3(
+        posAttr.getX(pivotIdx), posAttr.getY(pivotIdx), posAttr.getZ(pivotIdx),
+      );
+      editDragOrigDeltas = new Map();
       const tmp = new THREE.Vector3();
-      let changed = false;
-
-      for (let i = 0; i < count; i++) {
-        tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
-        const dist = tmp.distanceTo(hitPosLocal);
-        if (dist <= rcBrushRad) {
-          if (rcBrushModeAdd) {
-            if (!rcSelectedVerts.has(i)) { rcSelectedVerts.add(i); changed = true; }
-          } else {
-            if (rcSelectedVerts.has(i)) { rcSelectedVerts.delete(i); changed = true; }
-          }
-        }
-      }
-      if (changed) _rcApplyVertexColors();
-    }
-
-    function _rcPaintDown(e) {
-      if (!rcPaintActive || e.ctrlKey || e.metaKey) return;
-      if (e.button === 2) {
-        // Right click = remove mode for this drag
-        rcBrushModeAdd = false;
-        if (rcBrushMesh) rcBrushMesh.material.color.setHex(0xef4444);
-      }
-      rcPainting = true;
-      const hit = _rcRaycastMesh(e);
-      if (hit) _rcPaintAt(hit);
-    }
-
-    function _rcPaintMove(e) {
-      if (!rcPaintActive) return;
-      const hit = _rcRaycastMesh(e);
-      if (hit && rcBrushMesh) {
-        rcBrushMesh.position.copy(hit.point);
-        rcBrushMesh.visible = true;
-      } else if (rcBrushMesh) {
-        rcBrushMesh.visible = false;
-      }
-      if (rcPainting && hit) _rcPaintAt(hit);
-    }
-
-    function _rcPaintUp(e) {
-      rcPainting = false;
-      if (e.button === 2) {
-        // Restore brush mode after right-click drag
-        rcBrushModeAdd = document.getElementById('rc-brush-add').classList.contains('add-active');
-        if (rcBrushMesh) {
-          rcBrushMesh.material.color.setHex(rcBrushModeAdd ? 0x22c55e : 0xef4444);
-        }
-      }
-    }
-
-    rcRegionDropdown.addEventListener('change', () => {
-      if (!rcActive || !rcRegionData) return;
-      const regionIdx = parseInt(rcRegionDropdown.value);
-      // Rebuild selected verts from the saved all_indices/all_labels
-      rcSelectedVerts = new Set();
-      const allIdx = rcRegionData.all_indices;
-      const allLbl = rcRegionData.all_labels;
-      for (let i = 0; i < allIdx.length; i++) {
-        if (allLbl[i] === regionIdx) rcSelectedVerts.add(allIdx[i]);
-      }
-      rcVertCount.textContent = rcSelectedVerts.size + ' verts';
-      _rcApplyVertexColors();
-      _rcComputeCentroid();
-      _rcAddCentroidSphere();
-    });
-
-    document.getElementById('rc-reset-region').addEventListener('click', async () => {
-      if (!rcActive || !rcBsName || !currentRigId) return;
-      try {
-        const resp = await fetch(`/region-vertices/${currentRigId}?blendshape=${encodeURIComponent(rcBsName)}`);
-        if (resp.ok) {
-          rcRegionData = await resp.json();
-          rcSelectedVerts = new Set(rcRegionData.affected_vertex_indices);
-          rcVertCount.textContent = rcSelectedVerts.size + ' verts';
-          rcRegionDropdown.value = rcRegionData.region_index;
-          _rcApplyVertexColors();
-          _rcComputeCentroid();
-          _rcAddCentroidSphere();
-        }
-      } catch (err) { console.error(err); }
-    });
-
-    document.getElementById('rc-done-selecting').addEventListener('click', () => {
-      if (!rcActive) return;
-      _rcTeardownStep3();
-      _rcComputeCentroid();
-      _rcAddCentroidSphere();
-      _rcSetStep(4);
-      _rcSetupStep4();
-    });
-
-    // ── Step 4: Drag to Correct ─────────────────────────────────────
-
-    function _rcSetupStep4() {
-      if (!headMesh) return;
-
-      // Prepare corrected deltas as a working copy
-      const deltaAttr = headMesh.geometry.morphAttributes.position[rcBsIdx];
-      rcCorrectedDeltas = new Float32Array(rcOriginalDeltas);
-
-      // Set influence to 0 for gizmo-based editing (neutral pose)
-      headMesh.morphTargetInfluences[rcBsIdx] = 0;
-      rcPreviewOn = false;
-
-      // Create gizmo target at centroid (in world space)
-      rcGizmoTarget = new THREE.Object3D();
-      const worldCentroid = rcCentroid.clone();
-      headMesh.localToWorld(worldCentroid);
-      rcGizmoTarget.position.copy(worldCentroid);
-      rcGizmoStartPos = worldCentroid.clone();
-      scene.add(rcGizmoTarget);
-
-      // Create TransformControls
-      rcTransformCtrl = new TransformControls(camera, renderer.domElement);
-      rcTransformCtrl.setMode('translate');
-      rcTransformCtrl.setSize(0.6);
-      rcTransformCtrl.attach(rcGizmoTarget);
-      scene.add(rcTransformCtrl);
-
-      // Disable orbit during gizmo drag
-      rcTransformCtrl.addEventListener('dragging-changed', e => {
-        controls.enabled = !e.value;
-      });
-
-      // Update on drag
-      rcTransformCtrl.addEventListener('change', () => {
-        if (!rcActive || !rcGizmoTarget || !rcGizmoStartPos) return;
-
-        // Compute drag vector in local (mesh) space
-        const newWorld = rcGizmoTarget.position.clone();
-        const dragWorld = newWorld.clone().sub(rcGizmoStartPos);
-        // Convert to local mesh space
-        const invMat = new THREE.Matrix4().copy(headMesh.matrixWorld).invert();
-        const dragLocal = dragWorld.clone().applyMatrix4(
-          new THREE.Matrix4().extractRotation(invMat)
-        );
-
-        // Apply correction with falloff
-        const posAttr = headMesh.geometry.attributes.position;
-        const tmp = new THREE.Vector3();
-        const sigma2 = 2 * rcRegionRadius * rcRegionRadius;
-
-        for (let i = 0; i < posAttr.count; i++) {
-          const i3 = i * 3;
-          if (rcSelectedVerts.has(i)) {
-            tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
-            const dist2 = tmp.distanceToSquared(rcCentroid);
-            const falloff = Math.exp(-dist2 / sigma2);
-            rcCorrectedDeltas[i3]     = rcOriginalDeltas[i3]     + dragLocal.x * falloff;
-            rcCorrectedDeltas[i3 + 1] = rcOriginalDeltas[i3 + 1] + dragLocal.y * falloff;
-            rcCorrectedDeltas[i3 + 2] = rcOriginalDeltas[i3 + 2] + dragLocal.z * falloff;
-          } else {
-            rcCorrectedDeltas[i3]     = rcOriginalDeltas[i3];
-            rcCorrectedDeltas[i3 + 1] = rcOriginalDeltas[i3 + 1];
-            rcCorrectedDeltas[i3 + 2] = rcOriginalDeltas[i3 + 2];
-          }
-        }
-
-        // Write corrected deltas to the morph target
-        const morphAttr = headMesh.geometry.morphAttributes.position[rcBsIdx];
-        morphAttr.array.set(rcCorrectedDeltas);
-        morphAttr.needsUpdate = true;
-
-        // If previewing, mesh shows it live via influence=1
-        if (rcPreviewOn) {
-          headMesh.morphTargetInfluences[rcBsIdx] = 1.0;
-        }
-
-        // Show magnitude
-        const mag = dragWorld.length() * 1000;  // mm
-        rcDragMagnitude.textContent = mag.toFixed(1) + ' mm';
-      });
-
-      // Keyboard shortcuts
-      window.addEventListener('keydown', _rcStep4KeyHandler);
-    }
-
-    function _rcStep4KeyHandler(e) {
-      if (!rcActive || rcStep !== 4 || !rcTransformCtrl) return;
-      const key = e.key.toLowerCase();
-      if (key === 'x') rcTransformCtrl.showX = true, rcTransformCtrl.showY = false, rcTransformCtrl.showZ = false;
-      if (key === 'y') rcTransformCtrl.showX = false, rcTransformCtrl.showY = true, rcTransformCtrl.showZ = false;
-      if (key === 'z') rcTransformCtrl.showX = false, rcTransformCtrl.showY = false, rcTransformCtrl.showZ = true;
-      if (key === 'escape') {
-        // Reset corrected deltas back to original
-        rcCorrectedDeltas = new Float32Array(rcOriginalDeltas);
-        const morphAttr = headMesh.geometry.morphAttributes.position[rcBsIdx];
-        morphAttr.array.set(rcOriginalDeltas);
-        morphAttr.needsUpdate = true;
-        if (rcGizmoTarget && rcGizmoStartPos) rcGizmoTarget.position.copy(rcGizmoStartPos);
-        rcDragMagnitude.textContent = '0.0 mm';
-        // Restore all axes
-        rcTransformCtrl.showX = true; rcTransformCtrl.showY = true; rcTransformCtrl.showZ = true;
-      }
-    }
-
-    function _rcTeardownStep4() {
-      window.removeEventListener('keydown', _rcStep4KeyHandler);
-      if (rcTransformCtrl) {
-        rcTransformCtrl.detach();
-        scene.remove(rcTransformCtrl);
-        rcTransformCtrl.dispose();
-        rcTransformCtrl = null;
-      }
-      if (rcGizmoTarget) {
-        scene.remove(rcGizmoTarget);
-        rcGizmoTarget = null;
-      }
-      rcGizmoStartPos = null;
-    }
-
-    document.getElementById('rc-preview-toggle').addEventListener('click', () => {
-      if (!rcActive || !headMesh) return;
-      rcPreviewOn = !rcPreviewOn;
-      headMesh.morphTargetInfluences[rcBsIdx] = rcPreviewOn ? 1.0 : 0;
-      document.getElementById('rc-preview-toggle').textContent = rcPreviewOn ? 'Back to neutral' : 'Preview';
-    });
-
-    document.getElementById('rc-looks-good').addEventListener('click', () => {
-      if (!rcActive) return;
-      _rcTeardownStep4();
-      headMesh.morphTargetInfluences[rcBsIdx] = 0;
-      _rcSetStep(5);
-      _rcSetupStep5();
-    });
-
-    // ── Step 5: Mirror + Save ───────────────────────────────────────
-
-    function _rcSetupStep5() {
-      if (rcRegionData && rcRegionData.mirror_blendshape) {
-        rcMirrorLabel.textContent = 'Mirror to ' + rcRegionData.mirror_blendshape + '?';
-        rcMirrorBox.style.display = '';
-      } else {
-        rcMirrorBox.style.display = 'none';
-      }
-      rcMirrorApplied = false;
-    }
-
-    document.getElementById('rc-mirror-btn').addEventListener('click', () => {
-      if (!rcActive || !headMesh || !rcRegionData) return;
-      const mirrorName = rcRegionData.mirror_blendshape;
-      if (!mirrorName) return;
-      const mirrorIdx = headMesh.morphTargetDictionary[mirrorName];
-      if (mirrorIdx === undefined) return;
-
-      // Compute mirror deltas: flip X, keep Y and Z
-      const src = rcCorrectedDeltas || rcOriginalDeltas;
-      rcMirrorCorrected = new Float32Array(src.length);
-      const posAttr = headMesh.geometry.attributes.position;
-
       for (let i = 0; i < posAttr.count; i++) {
-        const i3 = i * 3;
-        rcMirrorCorrected[i3]     = -src[i3];      // flip X
-        rcMirrorCorrected[i3 + 1] = src[i3 + 1];   // keep Y
-        rcMirrorCorrected[i3 + 2] = src[i3 + 2];   // keep Z
-      }
-
-      // Apply to mirror morph target
-      const mirrorAttr = headMesh.geometry.morphAttributes.position[mirrorIdx];
-      mirrorAttr.array.set(rcMirrorCorrected);
-      mirrorAttr.needsUpdate = true;
-
-      // Quick preview: show mirrored morph for 0.5s
-      headMesh.morphTargetInfluences.fill(0);
-      headMesh.morphTargetInfluences[mirrorIdx] = 1.0;
-      rcMirrorApplied = true;
-
-      setTimeout(() => {
-        if (headMesh) headMesh.morphTargetInfluences[mirrorIdx] = 0;
-      }, 500);
-
-      document.getElementById('rc-mirror-btn').textContent = 'Mirrored!';
-      document.getElementById('rc-mirror-btn').disabled = true;
-    });
-
-    document.getElementById('rc-skip-mirror').addEventListener('click', () => {
-      rcMirrorBox.style.display = 'none';
-    });
-
-    document.getElementById('rc-save-correction').addEventListener('click', () => _rcSave(false));
-    document.getElementById('rc-save-next').addEventListener('click', () => _rcSave(true));
-    document.getElementById('rc-cancel').addEventListener('click', () => _rcClose(false));
-
-    async function _rcSave(openNext) {
-      if (!rcActive || !headMesh) return;
-
-      // Apply corrected deltas to the morph target permanently
-      const corrected = rcCorrectedDeltas || rcOriginalDeltas;
-      const morphAttr = headMesh.geometry.morphAttributes.position[rcBsIdx];
-      morphAttr.array.set(corrected);
-      morphAttr.needsUpdate = true;
-
-      // Build and send correction to backend
-      const baseAttr = headMesh.geometry.attributes.position;
-      const count = baseAttr.count;
-      const neutral = new Float32Array(count * 3);
-      const autoDeltas = new Float32Array(count * 3);
-      const correctedDeltas = new Float32Array(count * 3);
-
-      for (let i = 0; i < count; i++) {
-        const i3 = i * 3;
-        neutral[i3] = baseAttr.getX(i);
-        neutral[i3+1] = baseAttr.getY(i);
-        neutral[i3+2] = baseAttr.getZ(i);
-        autoDeltas[i3] = rcOriginalDeltas[i3];
-        autoDeltas[i3+1] = rcOriginalDeltas[i3+1];
-        autoDeltas[i3+2] = rcOriginalDeltas[i3+2];
-        correctedDeltas[i3] = corrected[i3];
-        correctedDeltas[i3+1] = corrected[i3+1];
-        correctedDeltas[i3+2] = corrected[i3+2];
-      }
-
-      const updatedVertexIndices = [...rcSelectedVerts];
-      const header = JSON.stringify({
-        blendshape_name: rcBsName,
-        rig_id: currentRigId || 'unknown',
-        vertex_count: count,
-        updated_vertex_indices: updatedVertexIndices,
-      });
-      const headerBytes = new TextEncoder().encode(header);
-      const headerLen = headerBytes.length;
-      const paddedHeaderLen = Math.ceil((4 + headerLen) / 4) * 4;
-      const totalSize = paddedHeaderLen + neutral.byteLength * 3;
-      const buf = new ArrayBuffer(totalSize);
-      new DataView(buf).setUint32(0, headerLen, true);
-      new Uint8Array(buf, 4, headerLen).set(headerBytes);
-      const floatOffset = paddedHeaderLen;
-      new Float32Array(buf, floatOffset, count * 3).set(neutral);
-      new Float32Array(buf, floatOffset + neutral.byteLength, count * 3).set(autoDeltas);
-      new Float32Array(buf, floatOffset + neutral.byteLength * 2, count * 3).set(correctedDeltas);
-
-      try {
-        const resp = await fetch('/save-correction', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: buf,
-        });
-        if (resp.ok) { console.log('Region correction saved'); _showEditToast('Correction saved — ' + rcBsName); }
-      } catch (err) { console.error('Save failed:', err); }
-
-      // If mirror was applied, save that too
-      if (rcMirrorApplied && rcMirrorCorrected && rcRegionData.mirror_blendshape) {
-        const mirrorName = rcRegionData.mirror_blendshape;
-        const mirrorIdx = headMesh.morphTargetDictionary[mirrorName];
-        if (mirrorIdx !== undefined) {
-          const mirrorOriginal = new Float32Array(headMesh.geometry.morphAttributes.position[mirrorIdx].array);
-          const mHeader = JSON.stringify({
-            blendshape_name: mirrorName,
-            rig_id: currentRigId || 'unknown',
-            vertex_count: count,
-          });
-          const mHeaderBytes = new TextEncoder().encode(mHeader);
-          const mHeaderLen = mHeaderBytes.length;
-          const mPaddedHeaderLen = Math.ceil((4 + mHeaderLen) / 4) * 4;
-          const mTotalSize = mPaddedHeaderLen + neutral.byteLength * 3;
-          const mBuf = new ArrayBuffer(mTotalSize);
-          new DataView(mBuf).setUint32(0, mHeaderLen, true);
-          new Uint8Array(mBuf, 4, mHeaderLen).set(mHeaderBytes);
-          const mFloatOff = mPaddedHeaderLen;
-          new Float32Array(mBuf, mFloatOff, count * 3).set(neutral);
-          new Float32Array(mBuf, mFloatOff + neutral.byteLength, count * 3).set(autoDeltas);
-          new Float32Array(mBuf, mFloatOff + neutral.byteLength * 2, count * 3).set(rcMirrorCorrected);
-          try {
-            await fetch('/save-correction', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/octet-stream' },
-              body: mBuf,
-            });
-          } catch (err) { console.error('Mirror save failed:', err); }
+        tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+        if (tmp.distanceTo(pivotLocal) <= editBrushRadius) {
+          editDragOrigDeltas.set(i, new THREE.Vector3(
+            deltaAttr.getX(i), deltaAttr.getY(i), deltaAttr.getZ(i),
+          ));
         }
       }
-
-      // Green flash animation
-      _rcApplyGreenFlash();
-      setTimeout(() => {
-        const nextBsName = openNext ? _rcGetNextBlendshape() : null;
-        _rcClose(true);
-        if (openNext && nextBsName) {
-          const nextIdx = headMesh.morphTargetDictionary[nextBsName];
-          if (nextIdx !== undefined) setTimeout(() => _rcOpen(nextIdx, nextBsName), 200);
-        }
-      }, 1000);
     }
 
-    function _rcGetNextBlendshape() {
-      if (!headMesh) return null;
-      const dict = headMesh.morphTargetDictionary;
-      const entries = Object.entries(dict).sort((a, b) => a[1] - b[1]);
-      const curIdx = entries.findIndex(([n]) => n === rcBsName);
-      if (curIdx >= 0 && curIdx < entries.length - 1) return entries[curIdx + 1][0];
-      return null;
+    function _onEditPointerMove(e) {
+      if (!editMode || !headMesh) return;
+
+      // Update brush sphere cursor on hover
+      const hit = _editRaycast(e);
+      if (hit && editBrushMesh) {
+        editBrushMesh.position.copy(hit.point);
+        editBrushMesh.visible = true;
+      } else if (editBrushMesh) {
+        editBrushMesh.visible = false;
+      }
+
+      // Continuous paint/erase while dragging
+      if (editPainting && hit) {
+        const tool = editToolModeOverride || editToolMode;
+        if (tool === 'paint') _paintAtPoint(hit, 0.4);
+        else if (tool === 'erase') _eraseAtPoint(hit, 0.4);
+        return;
+      }
+
+      if (!editDragging || !editDragOrigDeltas) return;
+
+      // Compute pixel-to-world drag (sculpt mode)
+      const posAttr = headMesh.geometry.attributes.position;
+      const deltaAttr = headMesh.geometry.morphAttributes.position[editMorphIdx];
+
+      // Pixel delta from drag start
+      const dxPx = e.clientX - editDragStartScreen.x;
+      const dyPx = e.clientY - editDragStartScreen.y;
+
+      // Depth at pivot
+      const camInv = camera.matrixWorldInverse;
+      const meshWorld = headMesh.matrixWorld;
+      const combined = new THREE.Matrix4().multiplyMatrices(camInv, meshWorld);
+      const tmp = new THREE.Vector3();
+      const pivotOrig = editDragOrigDeltas.get(editDragPivotIdx);
+      tmp.set(
+        posAttr.getX(editDragPivotIdx) + (pivotOrig ? pivotOrig.x : 0),
+        posAttr.getY(editDragPivotIdx) + (pivotOrig ? pivotOrig.y : 0),
+        posAttr.getZ(editDragPivotIdx) + (pivotOrig ? pivotOrig.z : 0),
+      );
+      tmp.applyMatrix4(combined);
+      const depth = -tmp.z;
+
+      const rect = canvasEl.getBoundingClientRect();
+      const fovRad = camera.fov * Math.PI / 180;
+      const pixelToWorld = 2 * depth * Math.tan(fovRad / 2) / rect.height;
+
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+
+      // Apply with Gaussian falloff centered on pivot base position
+      const pivotBase = new THREE.Vector3(
+        posAttr.getX(editDragPivotIdx),
+        posAttr.getY(editDragPivotIdx),
+        posAttr.getZ(editDragPivotIdx),
+      );
+      const sigma = editBrushRadius * 0.5;
+      const sigma2x2 = 2 * sigma * sigma;
+
+      let worldDelta;
+      if (e.shiftKey) {
+        // Shift+drag = move only along face normal direction
+        const faceNormal = hit ? hit.face.normal.clone() : new THREE.Vector3(0, 0, 1);
+        faceNormal.transformDirection(meshWorld);
+        const totalScreenDist = Math.sqrt(dxPx * dxPx + dyPx * dyPx);
+        const nScreen = faceNormal.clone().project(camera);
+        const dot = (dxPx * nScreen.x + (-dyPx) * nScreen.y);
+        const sign = dot >= 0 ? 1 : -1;
+        worldDelta = faceNormal.multiplyScalar(sign * totalScreenDist * pixelToWorld);
+      } else {
+        worldDelta = right.multiplyScalar(dxPx * pixelToWorld)
+          .add(up.multiplyScalar(-dyPx * pixelToWorld));
+      }
+
+      // Convert world delta to mesh local space
+      const invMat = new THREE.Matrix4().copy(headMesh.matrixWorld).invert();
+      const localDelta = worldDelta.transformDirection(invMat);
+
+      for (const [i, origDelta] of editDragOrigDeltas) {
+        tmp.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+        const dist2 = tmp.distanceToSquared(pivotBase);
+        const falloff = Math.exp(-dist2 / sigma2x2);
+        deltaAttr.setXYZ(i,
+          origDelta.x + localDelta.x * falloff,
+          origDelta.y + localDelta.y * falloff,
+          origDelta.z + localDelta.z * falloff,
+        );
+      }
+      deltaAttr.needsUpdate = true;
+
+      // Update heatmap in real time
+      if (editHeatmapOn) _applyHeatmap(parseFloat(editInfluenceSlider.value));
     }
 
-    // ── Close / cleanup ─────────────────────────────────────────────
-
-    function _rcClose(saved) {
-      if (!rcActive) return;
-
-      if (!saved && rcOriginalDeltas && headMesh) {
-        // Restore original deltas
-        const morphAttr = headMesh.geometry.morphAttributes.position[rcBsIdx];
-        morphAttr.array.set(rcOriginalDeltas);
-        morphAttr.needsUpdate = true;
+    function _onEditPointerUp(e) {
+      if (editPainting) {
+        editPainting = false;
+        editToolModeOverride = null;
+        canvasEl.style.cursor = 'crosshair';
+        try { canvasEl.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (editHeatmapOn) _applyHeatmap(parseFloat(editInfluenceSlider.value));
+        return;
       }
+      if (!editDragging) return;
+      editDragging = false;
+      editDragPivotIdx = null;
+      editDragOrigDeltas = null;
+      editDragStartWorld = null;
+      editDragStartScreen = null;
+      canvasEl.style.cursor = 'crosshair';
+      try { canvasEl.releasePointerCapture(e.pointerId); } catch (_) {}
 
-      _rcTeardownStep3();
-      _rcTeardownStep4();
-      _rcRemoveCentroidSphere();
-
-      // Remove brush mesh
-      if (rcBrushMesh) {
-        scene.remove(rcBrushMesh);
-        rcBrushMesh.geometry.dispose();
-        rcBrushMesh.material.dispose();
-        rcBrushMesh = null;
-      }
-
-      // Remove vertex colors
-      if (headMesh && headMesh.geometry.attributes.color) {
-        headMesh.geometry.deleteAttribute('color');
-        rcColorAttr = null;
-      }
-
-      // Restore materials
-      for (const orig of rcOrigMaterials) {
-        orig.ref.vertexColors = orig.vertexColors;
-        orig.ref.transparent = orig.transparent;
-        orig.ref.opacity = orig.opacity;
-        orig.ref.needsUpdate = true;
-      }
-      rcOrigMaterials = [];
-
-      // Reset morph
-      if (headMesh) {
-        headMesh.morphTargetInfluences.fill(0);
-        document.querySelectorAll('.morph-slider').forEach(s => { s.value = 0; });
-      }
-
-      // Restore orbit controls
-      controls.mouseButtons = {
-        LEFT: THREE.MOUSE.ROTATE,
-        MIDDLE: THREE.MOUSE.DOLLY,
-        RIGHT: THREE.MOUSE.PAN,
-      };
-
-      // Switch panels
-      rcPanel.style.display = 'none';
-      document.getElementById('morph-panel').style.display = '';
-      document.getElementById('preview-panel').classList.remove('rc-active');
-
-      // Rebuild morph list if saved
-      if (saved) _buildMorphList();
-
-      // Reset state
-      rcActive = false;
-      rcBsIdx = null;
-      rcBsName = null;
-      rcRegionData = null;
-      rcSelectedVerts = new Set();
-      rcOriginalDeltas = null;
-      rcCorrectedDeltas = null;
-      rcMirrorCorrected = null;
-      rcMirrorApplied = false;
-      rcPreviewOn = false;
+      // Refresh heatmap
+      if (editHeatmapOn) _applyHeatmap(parseFloat(editInfluenceSlider.value));
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -4071,6 +2967,95 @@
         console.error('Failed to save correction JSON:', err);
       }
     }
+    // ── Mirror morph support ──────────────────────────────────────────
+
+    function _getMirrorName(name) {
+      if (name.endsWith('Left')) return name.slice(0, -4) + 'Right';
+      if (name.endsWith('Right')) return name.slice(0, -5) + 'Left';
+      return null;
+    }
+
+    const mirrorModal   = document.getElementById('mirror-modal');
+    const mirrorText    = document.getElementById('mirror-modal-text');
+    const mirrorYesBtn  = document.getElementById('mirror-yes-btn');
+    const mirrorNoBtn   = document.getElementById('mirror-no-btn');
+
+    function _promptMirror(morphName, newDeltas, count) {
+      const mirrorName = _getMirrorName(morphName);
+      if (!mirrorName) return Promise.resolve();
+      if (!headMesh || !headMesh.morphTargetDictionary) return Promise.resolve();
+      if (!(mirrorName in headMesh.morphTargetDictionary)) return Promise.resolve();
+
+      return new Promise((resolve) => {
+        mirrorText.textContent = `Mirror edits to "${mirrorName}"?`;
+        mirrorModal.classList.add('show');
+
+        const cleanup = () => {
+          mirrorModal.classList.remove('show');
+          mirrorYesBtn.removeEventListener('click', onYes);
+          mirrorNoBtn.removeEventListener('click', onNo);
+        };
+
+        const onNo = () => { cleanup(); resolve(); };
+
+        const onYes = async () => {
+          cleanup();
+          const mirrorIdx = headMesh.morphTargetDictionary[mirrorName];
+          const mirrorAttr = headMesh.geometry.morphAttributes.position[mirrorIdx];
+          const posAttr = headMesh.geometry.attributes.position;
+
+          // Build a map from mirrored position (-x, y, z) to vertex index
+          // for matching vertices across the symmetry plane
+          const posMap = new Map();
+          for (let i = 0; i < count; i++) {
+            const key = `${(-posAttr.getX(i)).toFixed(6)},${posAttr.getY(i).toFixed(6)},${posAttr.getZ(i).toFixed(6)}`;
+            posMap.set(key, i);
+          }
+
+          const mirroredDeltas = new Float32Array(count * 3);
+          for (let i = 0; i < count; i++) {
+            const key = `${posAttr.getX(i).toFixed(6)},${posAttr.getY(i).toFixed(6)},${posAttr.getZ(i).toFixed(6)}`;
+            const mirrorVert = posMap.get(key);
+            if (mirrorVert !== undefined) {
+              const i3 = mirrorVert * 3;
+              // Mirror: negate X delta, keep Y and Z
+              mirroredDeltas[i * 3]     = -newDeltas[i3];
+              mirroredDeltas[i * 3 + 1] =  newDeltas[i3 + 1];
+              mirroredDeltas[i * 3 + 2] =  newDeltas[i3 + 2];
+            } else {
+              // No mirror match — keep existing delta
+              mirroredDeltas[i * 3]     = mirrorAttr.getX(i);
+              mirroredDeltas[i * 3 + 1] = mirrorAttr.getY(i);
+              mirroredDeltas[i * 3 + 2] = mirrorAttr.getZ(i);
+            }
+          }
+
+          // Apply mirrored deltas to the paired morph
+          const mirrorNewAttr = new THREE.Float32BufferAttribute(mirroredDeltas, 3);
+          headMesh.geometry.morphAttributes.position[mirrorIdx] = mirrorNewAttr;
+
+          // Save the mirrored correction using still-valid edit state
+          const savedMorphName = editMorphName;
+          const savedMorphIdx = editMorphIdx;
+          const savedOrigDeltas = editOriginalDeltas;
+          editMorphName = mirrorName;
+          editMorphIdx = mirrorIdx;
+          editOriginalDeltas = new Float32Array(mirrorAttr.array);
+          await _saveCorrection();
+          await _saveCorrectionJSON(mirroredDeltas, count);
+          editMorphName = savedMorphName;
+          editMorphIdx = savedMorphIdx;
+          editOriginalDeltas = savedOrigDeltas;
+          _showEditToast('Mirrored to ' + mirrorName);
+          _buildMorphList();
+          resolve();
+        };
+
+        mirrorYesBtn.addEventListener('click', onYes);
+        mirrorNoBtn.addEventListener('click', onNo);
+      });
+    }
+
   </script>
 </body>
 </html>
