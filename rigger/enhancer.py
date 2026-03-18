@@ -373,6 +373,20 @@ class MeshEnhancer:
         # Determine per-face region membership: a face is "face region" if
         # ALL its verts are in the face region
         face_in_region = np.all(face_region[faces], axis=1)
+
+        # Exclude inward-facing faces (nostril cavity, inner mouth) from remeshing.
+        # Their thin double-walls confuse the remesher's surface-distance check,
+        # preventing proper subdivision of the nose area.
+        head_normals = head_mesh.face_normals
+        head_center = verts.mean(axis=0)
+        face_centroids_3d = verts[faces].mean(axis=1)
+        outward = face_centroids_3d - head_center
+        dot = np.einsum('ij,ij->i', head_normals, outward)
+        n_inner = int((face_in_region & (dot < 0)).sum())
+        if n_inner > 0:
+            log.info("_region_remesh: excluding %d inward-facing cavity faces", n_inner)
+            face_in_region = face_in_region & (dot >= 0)
+
         face_outside = ~face_in_region
 
         # Extract face-region sub-mesh
@@ -399,14 +413,15 @@ class MeshEnhancer:
             face_matrix=region_faces_remapped.astype(np.int32),
         ))
 
-        fine_mm = _TARGET_EDGE_DENSE_M * 1000.0
+        # PureValue is in the mesh's native coordinate units (metres).
+        # Use _TARGET_EDGE_DENSE_M directly — do NOT multiply by 1000.
         ms.meshing_isotropic_explicit_remeshing(
-            targetlen=pymeshlab.PureValue(fine_mm),
+            targetlen=pymeshlab.PureValue(_TARGET_EDGE_DENSE_M),
             iterations=_REMESH_ITERATIONS,
-            adaptive=True,
+            adaptive=False,
             featuredeg=30.0,
             checksurfdist=True,
-            maxsurfdist=pymeshlab.PureValue(fine_mm * 0.5),
+            maxsurfdist=pymeshlab.PureValue(_TARGET_EDGE_DENSE_M * 0.5),
         )
 
         remeshed_result = ms.current_mesh()
@@ -468,10 +483,18 @@ class MeshEnhancer:
         mouth_density = _compute_region_edge_density(
             enhanced, region_centers, ("mouth_center",), _DENSE_REGION_RADIUS_M,
         )
+        nose_density = _compute_region_edge_density(
+            enhanced, region_centers, ("nose_tip",), _DENSE_REGION_RADIUS_M,
+        )
+        log.info(
+            "_region_remesh: nose density=%.2fmm (eye=%.2fmm, mouth=%.2fmm)",
+            nose_density * 1000, eye_density * 1000, mouth_density * 1000,
+        )
 
         stats = {
             "eye_region_density": eye_density,
             "mouth_region_density": mouth_density,
+            "nose_region_density": nose_density,
             "eyeball_verts_preserved": int(eyeball_mask.sum()),
             "remesh_duration_ms": 0,  # filled by caller
         }
@@ -542,7 +565,13 @@ class MeshEnhancer:
         face_verts = enhanced_vertices[enh_faces]       # (F, 3, 3)
         face_centroids = face_verts.mean(axis=1)        # (F, 3)
 
-        _, _, face_tri_ids = _closest_point(src_mesh, face_centroids)
+        # Compute per-face normals of the enhanced mesh at these faces
+        enh_trimesh = trimesh.Trimesh(vertices=enhanced_vertices, faces=enh_faces, process=False)
+        face_normals = enh_trimesh.face_normals  # (F, 3)
+        # Project centroids outward by 1mm along their face normal before querying
+        # so the closest-point search lands on outer skin, not inner nasal geometry
+        search_pts = face_centroids + face_normals * 0.001
+        _, _, face_tri_ids = _closest_point(src_mesh, search_pts)
 
         all_face_verts = face_verts.reshape(-1, 3)      # (F*3, 3)
         all_tri_ids = np.repeat(face_tri_ids, 3)        # (F*3,)
