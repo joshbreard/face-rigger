@@ -786,6 +786,20 @@ def transfer_morph_targets(
         0.0, 1.0,
     ).astype(np.float32)                           # 0 at cutoff, 1 at cutoff-15mm
 
+    # Soft falloff weights for upper-mouth shapes (suppress below lower lip).
+    _UPPER_MOUTH_BLEND_MM = 0.012                  # 12 mm blend zone
+    _upper_mouth_weights = np.clip(
+        (_y_verts - _lower_lip_y) / _UPPER_MOUTH_BLEND_MM,
+        0.0, 1.0,
+    ).astype(np.float32)                           # 0 below lip, 1 above lip+12mm
+
+    # Soft falloff weights for nose-sneer shapes (suppress below nose base).
+    _NOSE_SNEER_BLEND_MM = 0.010                   # 10 mm blend zone
+    _nose_sneer_weights = np.clip(
+        (_y_verts - _nose_base_y) / _NOSE_SNEER_BLEND_MM,
+        0.0, 1.0,
+    ).astype(np.float32)                           # 0 below nose, 1 above nose+10mm
+
     log.info(
         "Vertex mask counts — above_jaw_cutoff (Y>%.4f): %d/%d  "
         "in_jaw_blend_zone (%.4f<Y<=%.4f): %d/%d  "
@@ -851,37 +865,38 @@ def transfer_morph_targets(
                     n_active_masked, n_blended_active,
                 )
             else:
-                if n_masked > 0:
-                    target_disp[_above_jaw_cutoff] = 0.0
+                # Soft falloff for other jaw/lower-mouth shapes too
+                target_disp *= _jaw_open_weights[:, np.newaxis]
+                n_blended = int(((_jaw_open_weights > 0.0) & (_jaw_open_weights < 1.0)).sum())
                 log.info(
                     "Mask [jaw/lower-mouth] %-30s  "
-                    "zeroed %d/%d verts above jaw_cutoff_y=%.4fm  "
-                    "(%d had |disp|>0.1mm — these were suppressed)",
+                    "soft-blended %d/%d verts above jaw_cutoff_y=%.4fm  "
+                    "(%d had |disp|>0.1mm)",
                     name, n_masked, len(target_verts), _jaw_cutoff_y, n_active_masked,
                 )
         elif name in _MASK_UPPER_MOUTH:
             n_masked        = int(_below_lip_mask.sum())
             n_active_masked = int((_below_lip_mask & _active).sum())
-            if n_masked > 0:
-                target_disp = target_disp.copy()
-                target_disp[_below_lip_mask] = 0.0
+            target_disp = target_disp.copy()
+            target_disp *= _upper_mouth_weights[:, np.newaxis]
+            n_blended = int(((_upper_mouth_weights > 0.0) & (_upper_mouth_weights < 1.0)).sum())
             log.info(
                 "Mask [upper-mouth]    %-30s  "
-                "zeroed %d/%d verts below lower_lip_y=%.4fm  "
-                "(%d had |disp|>0.1mm — these were suppressed)",
-                name, n_masked, len(target_verts), _lower_lip_y, n_active_masked,
+                "soft-blended %d/%d verts below lower_lip_y=%.4fm  "
+                "(%d in blend zone, %d had |disp|>0.1mm)",
+                name, n_masked, len(target_verts), _lower_lip_y, n_blended, n_active_masked,
             )
         elif name in _MASK_NOSE_SNEER:
             n_masked        = int(_below_nose_base.sum())
             n_active_masked = int((_below_nose_base & _active).sum())
-            if n_masked > 0:
-                target_disp = target_disp.copy()
-                target_disp[_below_nose_base] = 0.0
+            target_disp = target_disp.copy()
+            target_disp *= _nose_sneer_weights[:, np.newaxis]
+            n_blended = int(((_nose_sneer_weights > 0.0) & (_nose_sneer_weights < 1.0)).sum())
             log.info(
                 "Mask [nose-sneer]     %-30s  "
-                "zeroed %d/%d verts below nose_base_y=%.4fm  "
-                "(%d had |disp|>0.1mm — these were suppressed)",
-                name, n_masked, len(target_verts), _nose_base_y, n_active_masked,
+                "soft-blended %d/%d verts below nose_base_y=%.4fm  "
+                "(%d in blend zone, %d had |disp|>0.1mm)",
+                name, n_masked, len(target_verts), _nose_base_y, n_blended, n_active_masked,
             )
 
         target_morph_targets[name] = target_disp

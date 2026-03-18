@@ -30,6 +30,21 @@ from rigger.transfer import ARKIT_BLENDSHAPES
 log = logging.getLogger(__name__)
 
 
+def _compute_smooth_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Compute area-weighted smooth vertex normals from mesh topology."""
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    face_normals = np.cross(v1 - v0, v2 - v0)
+    vertex_normals = np.zeros((len(verts), 3), dtype=np.float64)
+    np.add.at(vertex_normals, faces[:, 0], face_normals)
+    np.add.at(vertex_normals, faces[:, 1], face_normals)
+    np.add.at(vertex_normals, faces[:, 2], face_normals)
+    norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+    norms = np.where(norms > 1e-10, norms, 1.0)
+    return (vertex_normals / norms).astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Patch approach: keep original GLB geometry, inject morph targets only
 # ---------------------------------------------------------------------------
@@ -109,6 +124,30 @@ def patch_glb_add_morph_targets(
     n_prim_verts: int = gltf.accessors[head_prim.attributes.POSITION].count
     n_head_bs: int = len(next(iter(blendshapes.values()))) if blendshapes else 0
 
+    # ── Extract base geometry for smooth normal deltas ─────────────────────
+    _base_verts: np.ndarray | None = None
+    _base_faces: np.ndarray | None = None
+    _base_normals: np.ndarray | None = None
+    try:
+        pos_raw, _ = _read_accessor_bytes(gltf, orig_binary, head_prim.attributes.POSITION)
+        _base_verts = np.frombuffer(pos_raw, dtype=np.float32).reshape(-1, 3).copy()
+        if head_prim.indices is not None:
+            idx_raw, _ = _read_accessor_bytes(gltf, orig_binary, head_prim.indices)
+            idx_ct = gltf.accessors[head_prim.indices].componentType
+            if idx_ct in (_UNSIGNED_INT, 5125):
+                _base_faces = np.frombuffer(idx_raw, dtype=np.uint32).reshape(-1, 3).copy()
+            elif idx_ct == _UNSIGNED_SHORT:
+                _base_faces = np.frombuffer(idx_raw, dtype=np.uint16).astype(np.int64).reshape(-1, 3)
+            else:
+                _base_faces = np.frombuffer(idx_raw, dtype=np.uint8).astype(np.int64).reshape(-1, 3)
+            _base_normals = _compute_smooth_normals(_base_verts.astype(np.float64), _base_faces)
+            log.info(
+                "Computed smooth base normals for %d verts, %d faces (for morph NORMAL deltas).",
+                len(_base_verts), len(_base_faces),
+            )
+    except Exception as exc:
+        log.warning("Could not extract base geometry for normal deltas: %s", exc)
+
     # ── Append morph-target displacement data after the existing binary blob ──
     extra_chunks: list[bytes] = []
     current_offset: int = len(orig_binary)
@@ -133,6 +172,7 @@ def patch_glb_add_morph_targets(
         else:
             disp = raw
 
+        # ── POSITION accessor ──────────────────────────────────────────────
         arr_bytes = disp.tobytes()
         padded = arr_bytes + b"\x00" * ((-len(arr_bytes)) % 4)
 
@@ -143,7 +183,7 @@ def patch_glb_add_morph_targets(
             byteLength=len(arr_bytes),
             target=pygltflib.ARRAY_BUFFER,
         ))
-        acc_idx = len(gltf.accessors)
+        pos_acc_idx = len(gltf.accessors)
         gltf.accessors.append(pygltflib.Accessor(
             bufferView=bv_idx,
             byteOffset=0,
@@ -155,7 +195,39 @@ def patch_glb_add_morph_targets(
         ))
         extra_chunks.append(padded)
         current_offset += len(padded)
-        morph_target_list.append(pygltflib.Attributes(POSITION=acc_idx))
+
+        mt_attrs = pygltflib.Attributes(POSITION=pos_acc_idx)
+
+        # ── NORMAL delta accessor ─────────────────────────────────────────
+        if _base_normals is not None and _base_faces is not None:
+            morphed = _base_verts.astype(np.float64) + disp.astype(np.float64)
+            morphed_normals = _compute_smooth_normals(morphed, _base_faces)
+            normal_delta = (morphed_normals - _base_normals).astype(np.float32)
+
+            nd_bytes = normal_delta.tobytes()
+            nd_padded = nd_bytes + b"\x00" * ((-len(nd_bytes)) % 4)
+            nd_bv_idx = len(gltf.bufferViews)
+            gltf.bufferViews.append(pygltflib.BufferView(
+                buffer=0,
+                byteOffset=current_offset,
+                byteLength=len(nd_bytes),
+                target=pygltflib.ARRAY_BUFFER,
+            ))
+            nd_acc_idx = len(gltf.accessors)
+            gltf.accessors.append(pygltflib.Accessor(
+                bufferView=nd_bv_idx,
+                byteOffset=0,
+                componentType=pygltflib.FLOAT,
+                count=n_prim_verts,
+                type="VEC3",
+                min=normal_delta.min(axis=0).tolist(),
+                max=normal_delta.max(axis=0).tolist(),
+            ))
+            extra_chunks.append(nd_padded)
+            current_offset += len(nd_padded)
+            mt_attrs.NORMAL = nd_acc_idx
+
+        morph_target_list.append(mt_attrs)
 
     # ── Patch the primitive and mesh objects ──────────────────────────────────
     head_prim.targets = morph_target_list
@@ -309,7 +381,12 @@ def write_rigged_glb(
         a_uv, orig_uv_count, len(hv), a_norm,
     )
 
-    # ── 52 morph-target displacement accessors ───────────────────────────────
+    # ── Precompute base normals for morph-target NORMAL deltas ──────────────
+    _hf = np.asarray(head_faces, dtype=np.int64)
+    _base_norms = _compute_smooth_normals(hv.astype(np.float64), _hf)
+    log.info("Computed smooth base normals for %d verts (write_rigged_glb).", len(hv))
+
+    # ── 52 morph-target displacement + normal-delta accessors ─────────────
     morph_target_list: list[pygltflib.Attributes] = []
     for name in ARKIT_BLENDSHAPES:
         delta = np.asarray(blendshapes.get(name, np.zeros((len(hv), 3))), dtype=np.float32)
@@ -317,7 +394,14 @@ def write_rigged_glb(
             log.warning("Blendshape '%s' shape %s != (%d,3); zeroing.", name, delta.shape, len(hv))
             delta = np.zeros((len(hv), 3), dtype=np.float32)
         a_mt = builder.add_vec3(delta, target=pygltflib.ARRAY_BUFFER, with_bounds=True)
-        morph_target_list.append(pygltflib.Attributes(POSITION=a_mt))
+
+        # Normal delta
+        morphed = hv.astype(np.float64) + delta.astype(np.float64)
+        morphed_norms = _compute_smooth_normals(morphed, _hf)
+        nd = (morphed_norms - _base_norms).astype(np.float32)
+        a_nd = builder.add_vec3(nd, target=pygltflib.ARRAY_BUFFER, with_bounds=True)
+
+        morph_target_list.append(pygltflib.Attributes(POSITION=a_mt, NORMAL=a_nd))
 
     # ── Head mesh primitive ──────────────────────────────────────────────────
     prim_attrs = pygltflib.Attributes(POSITION=a_hv)
