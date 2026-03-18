@@ -13,6 +13,7 @@ from rigger.glb_writer import patch_glb_add_morph_targets
 from rigger.landmarks import detect_landmarks
 from rigger.mouth_slit import cut_mouth_slit
 from rigger.separator import separate_head_body
+from rigger.teeth_inserter import align_and_embed_teeth
 from rigger.transfer import (
     claire_neutral_m,
     transfer_morph_targets,
@@ -122,6 +123,18 @@ def run_rig_attempt(
             for name, disp in blendshapes.items()
         }
 
+        # ── Teeth insertion ────────────────────────────────────────────────
+        jaw_amp = float(np.linalg.norm(
+            blendshapes_orig.get("jawOpen", np.zeros((1, 3))), axis=1,
+        ).mean())
+        teeth_data = align_and_embed_teeth(
+            mouth_left_3d=aligned_lm_result["keypoints_3d"].get("mouth_left") if aligned_lm_result else None,
+            mouth_right_3d=aligned_lm_result["keypoints_3d"].get("mouth_right") if aligned_lm_result else None,
+            jaw_open_amplitude=jaw_amp,
+            alignment_meta=alignment_meta,
+        )
+        scene_meta["teeth_data"] = teeth_data
+
         log.info("Patching original GLB with morph-target accessors...")
         patch_glb_add_morph_targets(
             original_glb_bytes=glb_bytes,
@@ -130,6 +143,7 @@ def run_rig_attempt(
             original_head_name=scene_meta.get("original_head_name"),
             head_vert_indices=scene_meta.get("head_vert_indices"),
             seam_orig_indices=scene_meta.get("seam_orig_indices"),
+            teeth_data=teeth_data,
         )
 
         validation_data = score_rig(blendshapes_orig)

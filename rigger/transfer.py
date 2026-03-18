@@ -836,35 +836,28 @@ def transfer_morph_targets(
         _nose_y = float(np.percentile(_y_verts, 40))
         log.warning("Nose tip: no center-band vertices found — fallback nose_y=%.4fm", _nose_y)
 
-    # Jaw-region upper cutoff.
-    #
-    # We tried deriving this from Claire's jawOpen displacement field but that
-    # approach fails: jawOpen displaces vertices all the way up to the cheeks,
-    # so "max Y of significant jaw verts" lands at cheek level — far above the
-    # mouth.  The correct boundary is simpler: the nose tip Y IS the cutoff.
-    # Anything at or above the nose base must not move with jaw blendshapes.
-    # We subtract 5 mm (nose_y - 0.005) so the cutoff sits just below the nose
-    # tip, fully suppressing the nose and all geometry above it.
-    #
-    # Sanity check from this run's data:
-    #   nose_y ≈ -0.0147 m  (nose tip, correctly found as max-Z centre vertex)
-    #   Old value (nose_y + 0.010) ≈ -0.0047 m  ← too high, nose still moved
-    #   New value (nose_y - 0.005) ≈ -0.0197 m  ← below nose base → correct
-    _jaw_cutoff_y = _nose_y - 0.005
-
     # Lower lip / upper-mouth boundary.
     # Estimate chin as the 5th-percentile Y (lowest real face geometry, not outliers).
     _chin_y = float(np.percentile(_y_verts, 5))
     _nose_to_chin = abs(_nose_y - _chin_y)
-    # Upper lip sits roughly 20 % of the nose-to-chin distance below the nose.
-    _lower_lip_y = _nose_y - 0.20 * _nose_to_chin
+    # Upper lip sits roughly 15 % of the nose-to-chin distance below the nose.
+    _lower_lip_y = _nose_y - 0.15 * _nose_to_chin
+
+    # Jaw-region upper cutoff.
+    #
+    # Use lower_lip_y as the jaw cutoff instead of nose_y - 5mm.
+    # lower_lip_y already sits ~15% of nose-to-chin below the nose,
+    # which correctly separates upper face from the jaw region.
+    # The old formula (nose_y - 0.005) was too aggressive — it zeroed
+    # out 6,493 of 10,288 vertices including the entire lower face.
+    _jaw_cutoff_y = _lower_lip_y
 
     # Nose base Y: slightly below nose tip (≈ 5 % of face height lower).
     _nose_base_y = _nose_y - 0.05 * _face_height
 
     log.info(
         "Anatomical mask thresholds — "
-        "jaw_cutoff_y=%.4fm (nose_y=%.4fm - 5mm)  "
+        "jaw_cutoff_y=%.4fm (=lower_lip_y, nose_y=%.4fm)  "
         "lower_lip_y=%.4fm  nose_base_y=%.4fm  "
         "chin_y(p5)=%.4fm  nose_to_chin=%.4fm  face_height=%.4fm",
         _jaw_cutoff_y, _nose_y, _lower_lip_y, _nose_base_y,
@@ -876,7 +869,7 @@ def transfer_morph_targets(
     _JAW_RIGID_SHAPES: frozenset[str] = frozenset({
         "jawOpen", "jawForward", "jawLeft", "jawRight",
     })
-    _JAW_DIFFUSE_RADIUS_M: float = 0.030  # 30 mm propagation radius
+    _JAW_DIFFUSE_RADIUS_M: float = 0.050  # 50 mm propagation radius
 
     _MASK_LOWER_JAW: frozenset[str] = frozenset({
         "jawOpen", "jawForward", "jawLeft", "jawRight",
@@ -898,11 +891,11 @@ def transfer_morph_targets(
     _below_lip_mask   = _y_verts < _lower_lip_y    # vertices below lower lip
     _below_nose_base  = _y_verts < _nose_base_y    # vertices below nose base
 
-    # Soft falloff weights for jawOpen only: linear ramp in the 15 mm zone
+    # Soft falloff weights for jawOpen only: linear ramp in the 25 mm zone
     # just below jaw_cutoff_y.  Outside the blend zone the weight is either
-    # 0 (above cutoff, fully suppressed) or 1 (below cutoff-15mm, full motion).
+    # 0 (above cutoff, fully suppressed) or 1 (below cutoff-25mm, full motion).
     # Shape: (N,) float32, values in [0, 1].
-    _JAW_BLEND_MM   = 0.015                        # 15 mm blend zone
+    _JAW_BLEND_MM   = 0.025                        # 25 mm blend zone
     _jaw_blend_low  = _jaw_cutoff_y - _JAW_BLEND_MM
     _jaw_open_weights = np.clip(
         (_jaw_cutoff_y - _y_verts) / _JAW_BLEND_MM,
@@ -941,10 +934,6 @@ def transfer_morph_targets(
         )
         if mags.mean() < 0.001:
             log.warning("NEAR-ZERO: %s mean=%.6fm — check scale/alignment.", name, mags.mean())
-
-        if name == "jawOpen":
-            nonzero = mags[mags > 1e-9]
-            jaw_transferred_mean = float(nonzero.mean()) if len(nonzero) else 0.0
 
         # ── Post-transfer anatomical masking ────────────────────────────────
         # "active" = displacement magnitude > 0.1 mm (meaningful motion)
@@ -1004,6 +993,14 @@ def transfer_morph_targets(
                 "(%d had |disp|>0.1mm — these were suppressed)",
                 name, n_masked, len(target_verts), _nose_base_y, n_active_masked,
             )
+
+        # ── Post-mask jawOpen mean for scale-mismatch detection ──────────
+        # Must be computed AFTER masking zeros out upper-face verts, so the
+        # ratio comparison uses the actual post-mask displacement.
+        if name == "jawOpen":
+            post_mags = np.linalg.norm(target_disp, axis=1)
+            nonzero_post = post_mags[post_mags > 1e-9]
+            jaw_transferred_mean = float(nonzero_post.mean()) if len(nonzero_post) else 0.0
 
         # ── Jaw diffusion: propagate displacement to underside gap vertices ──
         # The frontal-only RBF control points miss the jaw underside, leaving

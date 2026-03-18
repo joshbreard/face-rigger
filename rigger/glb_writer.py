@@ -41,6 +41,7 @@ def patch_glb_add_morph_targets(
     original_head_name: str | None = None,
     head_vert_indices: "np.ndarray | None" = None,
     seam_orig_indices: "np.ndarray | None" = None,
+    teeth_data: dict | None = None,
 ) -> None:
     """Add 52 ARKit morph targets to the head primitive of the original GLB.
 
@@ -62,6 +63,8 @@ def patch_glb_add_morph_targets(
                          copies.  Used to extend head_vert_indices so that
                          the upper-lip copy displacements are written into the
                          correct positions in the full-mesh output.
+    teeth_data         : optional dict from align_and_embed_teeth with teeth
+                         geometry and blendshapes to append to the scene.
     """
     gltf = pygltflib.GLTF2.load_from_bytes(original_glb_bytes)
     orig_binary: bytes = gltf.binary_blob() or b""
@@ -183,6 +186,10 @@ def patch_glb_add_morph_targets(
     head_mesh_obj.extras = (head_mesh_obj.extras or {})
     head_mesh_obj.extras["targetNames"] = target_names
 
+    # ── Append teeth meshes if present ────────────────────────────────────────
+    if teeth_data is not None:
+        _append_teeth_meshes(gltf, extra_chunks, current_offset, teeth_data)
+
     # ── Write patched binary blob ─────────────────────────────────────────────
     new_binary = orig_binary + b"".join(extra_chunks)
     saved_buffer_views = gltf.bufferViews
@@ -201,6 +208,185 @@ def patch_glb_add_morph_targets(
     )
     gltf.save(str(output_path))
     log.info("Patched GLB saved.")
+
+
+def _append_teeth_meshes(
+    gltf: pygltflib.GLTF2,
+    extra_chunks: list[bytes],
+    current_offset: int,
+    teeth_data: dict,
+) -> None:
+    """Append upper teeth, lower teeth, and optional cavity meshes to the GLTF scene."""
+
+    def _add_chunk(data_bytes: bytes) -> int:
+        """Append padded bytes; return bufferView index."""
+        nonlocal current_offset
+        padded = data_bytes + b"\x00" * ((-len(data_bytes)) % 4)
+        bv_idx = len(gltf.bufferViews)
+        gltf.bufferViews.append(pygltflib.BufferView(
+            buffer=0,
+            byteOffset=current_offset,
+            byteLength=len(data_bytes),
+            target=pygltflib.ARRAY_BUFFER,
+        ))
+        extra_chunks.append(padded)
+        current_offset += len(padded)
+        return bv_idx
+
+    def _add_index_chunk(data_bytes: bytes) -> int:
+        nonlocal current_offset
+        padded = data_bytes + b"\x00" * ((-len(data_bytes)) % 4)
+        bv_idx = len(gltf.bufferViews)
+        gltf.bufferViews.append(pygltflib.BufferView(
+            buffer=0,
+            byteOffset=current_offset,
+            byteLength=len(data_bytes),
+            target=pygltflib.ELEMENT_ARRAY_BUFFER,
+        ))
+        extra_chunks.append(padded)
+        current_offset += len(padded)
+        return bv_idx
+
+    def _add_vec3_accessor(arr: np.ndarray, is_index: bool = False) -> int:
+        arr = np.asarray(arr, dtype=np.float32)
+        bv_idx = _add_chunk(arr.tobytes())
+        acc_idx = len(gltf.accessors)
+        gltf.accessors.append(pygltflib.Accessor(
+            bufferView=bv_idx,
+            byteOffset=0,
+            componentType=pygltflib.FLOAT,
+            count=len(arr),
+            type="VEC3",
+            min=arr.min(axis=0).tolist(),
+            max=arr.max(axis=0).tolist(),
+        ))
+        return acc_idx
+
+    def _add_index_accessor(faces: np.ndarray) -> int:
+        indices = np.asarray(faces, dtype=np.uint32).flatten()
+        bv_idx = _add_index_chunk(indices.tobytes())
+        acc_idx = len(gltf.accessors)
+        gltf.accessors.append(pygltflib.Accessor(
+            bufferView=bv_idx,
+            byteOffset=0,
+            componentType=pygltflib.UNSIGNED_INT,
+            count=len(indices),
+            type="SCALAR",
+        ))
+        return acc_idx
+
+    # ── Create materials for teeth ────────────────────────────────────────────
+    # White unlit PBR for upper teeth and cavity.
+    upper_mat_idx = len(gltf.materials) if gltf.materials else 0
+    if not gltf.materials:
+        gltf.materials = []
+    gltf.materials.append(pygltflib.Material(
+        name="teeth_upper_mat",
+        pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+            baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+            metallicFactor=0.0,
+            roughnessFactor=0.9,
+        ),
+        extensions={"KHR_materials_unlit": {}},
+    ))
+    # Slightly off-white for lower teeth.
+    lower_mat_idx = len(gltf.materials)
+    gltf.materials.append(pygltflib.Material(
+        name="teeth_lower_mat",
+        pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+            baseColorFactor=[0.92, 0.90, 0.88, 1.0],
+            metallicFactor=0.0,
+            roughnessFactor=0.9,
+        ),
+        extensions={"KHR_materials_unlit": {}},
+    ))
+    cavity_mat_idx = upper_mat_idx  # reuse white for cavity
+
+    # Register KHR_materials_unlit extension if not already present.
+    if not gltf.extensionsUsed:
+        gltf.extensionsUsed = []
+    if "KHR_materials_unlit" not in gltf.extensionsUsed:
+        gltf.extensionsUsed.append("KHR_materials_unlit")
+
+    # Ensure the scene node list exists.
+    scene = gltf.scenes[gltf.scene or 0]
+
+    # ── Upper teeth (no morph targets) ────────────────────────────────────────
+    uv = teeth_data["upper_teeth_verts"]
+    uf = teeth_data["upper_teeth_faces"]
+    a_uv = _add_vec3_accessor(uv)
+    a_ui = _add_index_accessor(uf)
+
+    upper_prim = pygltflib.Primitive(
+        attributes=pygltflib.Attributes(POSITION=a_uv),
+        indices=a_ui,
+        material=upper_mat_idx,
+    )
+    upper_mesh = pygltflib.Mesh(name="upper_teeth", primitives=[upper_prim])
+    upper_mesh_idx = len(gltf.meshes)
+    gltf.meshes.append(upper_mesh)
+    upper_node = pygltflib.Node(name="upper_teeth", mesh=upper_mesh_idx)
+    upper_node_idx = len(gltf.nodes)
+    gltf.nodes.append(upper_node)
+    scene.nodes.append(upper_node_idx)
+    log.info("Added upper_teeth mesh: %d verts, %d faces", len(uv), len(uf))
+
+    # ── Lower teeth (with 52 ARKit morph targets) ─────────────────────────────
+    lv = teeth_data["lower_teeth_verts"]
+    lf = teeth_data["lower_teeth_faces"]
+    a_lv = _add_vec3_accessor(lv)
+    a_li = _add_index_accessor(lf)
+
+    n_lower = len(lv)
+    lower_bs = teeth_data["lower_teeth_blendshapes"]
+    lower_morph_targets: list[pygltflib.Attributes] = []
+    for name in ARKIT_BLENDSHAPES:
+        disp = np.asarray(lower_bs.get(name, np.zeros((n_lower, 3))), dtype=np.float32)
+        a_mt = _add_vec3_accessor(disp)
+        lower_morph_targets.append(pygltflib.Attributes(POSITION=a_mt))
+
+    target_names = list(ARKIT_BLENDSHAPES)
+    lower_prim = pygltflib.Primitive(
+        attributes=pygltflib.Attributes(POSITION=a_lv),
+        indices=a_li,
+        material=lower_mat_idx,
+        targets=lower_morph_targets,
+        extras={"targetNames": target_names},
+    )
+    lower_mesh = pygltflib.Mesh(
+        name="lower_teeth",
+        primitives=[lower_prim],
+        weights=[0.0] * 52,
+        extras={"targetNames": target_names},
+    )
+    lower_mesh_idx = len(gltf.meshes)
+    gltf.meshes.append(lower_mesh)
+    lower_node = pygltflib.Node(name="lower_teeth", mesh=lower_mesh_idx)
+    lower_node_idx = len(gltf.nodes)
+    gltf.nodes.append(lower_node)
+    scene.nodes.append(lower_node_idx)
+    log.info("Added lower_teeth mesh: %d verts, %d faces, 52 morph targets", len(lv), len(lf))
+
+    # ── Cavity (no morph targets) ─────────────────────────────────────────────
+    cv = teeth_data.get("cavity_verts")
+    cf = teeth_data.get("cavity_faces")
+    if cv is not None and cf is not None:
+        a_cv = _add_vec3_accessor(cv)
+        a_ci = _add_index_accessor(cf)
+
+        cavity_prim = pygltflib.Primitive(
+            attributes=pygltflib.Attributes(POSITION=a_cv),
+            indices=a_ci,
+            material=cavity_mat_idx,
+        )
+        cavity_mesh = pygltflib.Mesh(name="mouth_cavity", primitives=[cavity_prim])
+        cavity_mesh_idx = len(gltf.meshes)
+        gltf.meshes.append(cavity_mesh)
+        cavity_node = pygltflib.Node(name="mouth_cavity", mesh=cavity_mesh_idx)
+        cavity_node_idx = len(gltf.nodes)
+        gltf.nodes.append(cavity_node)
+        scene.nodes.append(cavity_node_idx)
+        log.info("Added mouth_cavity mesh: %d verts, %d faces", len(cv), len(cf))
 
 
 # GLTF component type constants
