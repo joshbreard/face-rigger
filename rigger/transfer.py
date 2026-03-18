@@ -2,13 +2,14 @@
 
 Transfer strategy
 -----------------
-Primary: barycentric surface projection onto a convex hull built from Claire's
-frontalMask vertices (requires the ``rtree`` package).  For each Meshy vertex,
-find the nearest triangle on the hull, compute barycentric coordinates, and
-interpolate the displacement from the 3 corner vertices.
+Primary: Wendland C2 compactly-supported RBF kernel (support radius 35 mm).
+Displacements from Claire vertices beyond the support radius contribute
+exactly zero — no oscillation or overshoot.
+
+POU path: Partition-of-Unity RBF with Wendland C2 per anatomical region.
 
 Fallback: IDW k=4 (inverse-distance-weighted average of the 4 nearest Claire
-vertices).  Activates automatically if rtree is absent or hull build fails.
+vertices).  Activates automatically when fewer than 4 control points exist.
 
 Data note
 ---------
@@ -110,6 +111,9 @@ SMILE_LOCAL_MEAN_TARGET: float = 0.003  # metres (3 mm)
 # Clamp range for the secondary mean-boost scale factor.
 SMILE_MEAN_BOOST_MIN: float = 0.5
 SMILE_MEAN_BOOST_MAX: float = 3.0
+
+# Compact support radius for Wendland C2 kernel (35 mm).
+_WENDLAND_RADIUS_M: float = 0.035
 
 # ---------------------------------------------------------------------------
 # Module-level Claire data — populated by _load_bs_skin() at import time.
@@ -286,6 +290,84 @@ def _transfer_idw(
     w = 1.0 / (dists + 1e-12)
     w /= w.sum(axis=1, keepdims=True)
     return (claire_disp[idxs] * w[:, :, np.newaxis]).sum(axis=1)  # (N, 3)
+
+
+def _wendland_c2(r: np.ndarray, eps: float) -> np.ndarray:
+    """Wendland C2 compactly-supported radial basis function."""
+    t = np.clip(r / eps, 0.0, 1.0)
+    return (1.0 - t) ** 4 * (4.0 * t + 1.0)
+
+
+def _precompute_wendland(
+    target_verts: np.ndarray,
+    claire_verts: np.ndarray,
+    eps: float = _WENDLAND_RADIUS_M,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute the geometry-dependent parts of the Wendland C2 solve.
+
+    Everything returned is constant across all 52 blendshapes — only the
+    per-shape displacement RHS changes.
+
+    Parameters
+    ----------
+    target_verts : (N, 3)
+    claire_verts : (V_claire, 3)
+    eps          : compact support radius in metres.
+
+    Returns
+    -------
+    lu, piv    : LU factorization of the (n_centers × n_centers) kernel matrix.
+    K_eval     : (N_target, n_centers) evaluation kernel matrix.
+    cp_idx     : (n_centers,) indices into claire_verts for the control points.
+    """
+    if _claire_frontal_indices is not None:
+        cp_idx = _claire_frontal_indices
+    else:
+        cp_idx = np.arange(len(claire_verts))
+
+    cp_pos = claire_verts[cp_idx]
+
+    # (n_centers × n_centers) kernel matrix + LU factorization
+    r_cc = np.linalg.norm(
+        cp_pos[:, np.newaxis, :] - cp_pos[np.newaxis, :, :], axis=2,
+    )
+    Phi = _wendland_c2(r_cc, eps)
+    smoothing = _RBF_SMOOTHING_BASE + len(cp_pos) * _RBF_SMOOTHING_PER_CENTER
+    np.fill_diagonal(Phi, Phi.diagonal() + smoothing)
+    lu, piv = lu_factor(Phi)
+
+    # (N_target × n_centers) evaluation kernel — built once, reused 52×
+    r_tc = np.linalg.norm(
+        target_verts[:, np.newaxis, :] - cp_pos[np.newaxis, :, :], axis=2,
+    )
+    K_eval = _wendland_c2(r_tc, eps)
+
+    return lu, piv, K_eval, cp_idx
+
+
+def _transfer_wendland(
+    claire_disp: np.ndarray,
+    lu: np.ndarray,
+    piv: np.ndarray,
+    K_eval: np.ndarray,
+    cp_idx: np.ndarray,
+) -> np.ndarray:
+    """Evaluate one blendshape through a precomputed Wendland C2 kernel.
+
+    Parameters
+    ----------
+    claire_disp : (V_claire, 3) displacement vectors for this blendshape.
+    lu, piv     : precomputed LU factorization (from _precompute_wendland).
+    K_eval      : (N_target, n_centers) evaluation kernel (from _precompute_wendland).
+    cp_idx      : (n_centers,) control-point indices into claire_disp.
+
+    Returns
+    -------
+    (N_target, 3) displacement array.
+    """
+    cp_disp = claire_disp[cp_idx]
+    w = lu_solve((lu, piv), cp_disp)  # (n_centers, 3)
+    return K_eval @ w  # (N_target, 3)
 
 
 # Mediapipe landmark index -> canonical Claire anchor position (metres, centred).
@@ -626,45 +708,20 @@ def transfer_morph_targets(
         len(target_verts), *target_verts.mean(axis=0),
     )
 
-    # Full IDW tree (always built — used as landmark-RBF fallback and IDW path).
-    idw_tree_full = KDTree(claire_neutral_m)
+    n_frontal = len(_claire_frontal_indices) if _claire_frontal_indices is not None else len(claire_neutral_m)
+    log.info(
+        "Transfer method: Wendland C2 (compact support radius=%.0fmm, %d frontal verts).",
+        _WENDLAND_RADIUS_M * 1000, n_frontal,
+    )
 
-    # ── Try landmark detection ───────────────────────────────────────────────
-    _landmark_anchors = None
-    if _claire_frontal_tree is not None and _claire_frontal_indices is not None:
-        try:
-            import mediapipe  # noqa: F401 — presence check
-            import mediapipe.tasks  # noqa: F401 — ensure Tasks API is available
-            lm_pixels = _detect_landmarks(target_mesh)
-            if lm_pixels is not None:
-                meshy_idx, claire_idx = _build_landmark_anchors(target_verts, lm_pixels)
-                _landmark_anchors = (meshy_idx, claire_idx)
-                log.info("LANDMARK anchors built: %d control points.", len(meshy_idx))
-            else:
-                log.warning("Landmark detection failed; falling back to barycentric/IDW.")
-        except ImportError:
-            log.info("mediapipe not installed; using barycentric/IDW transfer.")
-
-    # ── Prepare barycentric / IDW structures (only when landmark unavailable) ─
-    use_barycentric = _claire_hull is not None
-    mapping = None
-    idw_tree = None  # used only in pure-IDW path
-
-    if _landmark_anchors is None:
-        if use_barycentric:
-            log.info(
-                "Transfer method: BARYCENTRIC (frontal hull %d tris, %d verts).",
-                len(_claire_hull.faces), len(_claire_hull.vertices),
-            )
-            log.info("Precomputing barycentric mapping for %d target vertices...", len(target_verts))
-            mapping = _precompute_bary_mapping(target_verts)
-        else:
-            log.info(
-                "Transfer method: IDW k=4 (barycentric hull unavailable). "
-                "Reusing full KD-tree on %d Claire vertices.",
-                len(claire_neutral_m),
-            )
-            idw_tree = idw_tree_full
+    # Precompute Wendland kernel + LU factorization once for all 52 blendshapes.
+    if n_frontal < 4:
+        wend_precomp = None
+        log.warning("Fewer than 4 frontal verts — all 52 shapes will use IDW k=4 fallback.")
+    else:
+        wend_precomp = _precompute_wendland(target_verts, claire_neutral_m, eps=_WENDLAND_RADIUS_M)
+        log.info("Wendland precompute done: LU(%d×%d) + K_eval(%d×%d).",
+                 n_frontal, n_frontal, len(target_verts), n_frontal)
 
     # Reference Claire jawOpen magnitude for scale mismatch detection.
     jaw_claire_disp = _claire_deltas_m.get("jawOpen", np.zeros_like(claire_neutral_m))
@@ -803,14 +860,12 @@ def transfer_morph_targets(
     for name in ARKIT_BLENDSHAPES:
         claire_disp = _claire_deltas_m.get(name, np.zeros_like(claire_neutral_m))
 
-        if _landmark_anchors is not None:
-            target_disp = _transfer_landmark_anchored(
-                target_verts, claire_disp, *_landmark_anchors, idw_tree_full
-            )
-        elif use_barycentric:
-            target_disp = _transfer_barycentric_with_mapping(claire_disp, mapping)
+        if wend_precomp is not None:
+            lu, piv, K_eval, cp_idx = wend_precomp
+            target_disp = _transfer_wendland(claire_disp, lu, piv, K_eval, cp_idx)
         else:
-            target_disp = _transfer_idw(target_verts, claire_disp, idw_tree)
+            idw_tree = KDTree(claire_neutral_m)
+            target_disp = _transfer_idw(target_verts, claire_disp, idw_tree, k=4)
 
         mags = np.linalg.norm(target_disp, axis=1)
         log.info(
@@ -907,11 +962,7 @@ def transfer_morph_targets(
     # local displacement magnitude.
     _RESCALE_EYE_PREFIXES = ("eyeBlink", "eyeLook", "eyeWide", "eyeSquint")
     _RESCALE_SMILE_SHAPES = frozenset({"mouthSmileLeft", "mouthSmileRight"})
-    _RESCALE_RADIUS_M = 0.012  # 12 mm neighbourhood radius
-
-    # Landmark index order within _LANDMARK_TO_CLAIRE_POS (dict-insertion order, Python 3.7+).
-    _lm_key_list = list(_LANDMARK_TO_CLAIRE_POS.keys())
-    # [152, 33, 263, 4, 61, 291, 70, 300]
+    _RESCALE_RADIUS_M = 0.025  # 25 mm neighbourhood radius
 
     for _rname in ARKIT_BLENDSHAPES:
         if _rname not in target_morph_targets:
@@ -931,13 +982,8 @@ def transfer_morph_targets(
         # Anchor position in Claire space (canonical).
         _anchor_claire = np.array(_LANDMARK_TO_CLAIRE_POS[_lm_idx])
 
-        # Anchor position in target space: use detected landmark vertex if available,
-        # otherwise fall back to the same canonical position (meshes are ICP-aligned).
-        if _landmark_anchors is not None:
-            _k = _lm_key_list.index(_lm_idx)
-            _anchor_target = target_verts[_landmark_anchors[0][_k]]
-        else:
-            _anchor_target = _anchor_claire.copy()
+        # Anchor position in target space: canonical position (meshes are ICP-aligned).
+        _anchor_target = _anchor_claire.copy()
 
         # Local vertex masks (within 12 mm of anchor).
         _dists_t = np.linalg.norm(target_verts - _anchor_target, axis=1)
@@ -1010,24 +1056,20 @@ def transfer_morph_targets(
     # still below SMILE_LOCAL_MEAN_TARGET, scale its local vertices up toward
     # that target — but only when the global jaw ratio is within a sane range
     # so we don't try to compensate for a fundamentally broken transfer.
-    _jaw_ratio_ok = jaw_ratio is not None and 0.3 <= jaw_ratio <= 2.0
+    _jaw_ratio_ok = jaw_ratio is not None and 0.1 <= jaw_ratio <= 5.0
     for _sname, _slm_idx in [("mouthSmileLeft", 61), ("mouthSmileRight", 291)]:
         if _sname not in target_morph_targets:
             continue
         if not _jaw_ratio_ok:
             log.info(
-                "LocalRescale [%s]: skipping mean boost — jaw_ratio=%s outside [0.3, 2.0].",
+                "LocalRescale [%s]: skipping mean boost — jaw_ratio=%s outside [0.1, 5.0].",
                 _sname, f"{jaw_ratio:.3f}" if jaw_ratio is not None else "N/A",
             )
             continue
 
         # Recompute anchor / local mask (same logic as local rescale loop above).
         _anchor_s = np.array(_LANDMARK_TO_CLAIRE_POS[_slm_idx])
-        if _landmark_anchors is not None:
-            _k_s = _lm_key_list.index(_slm_idx)
-            _anchor_s_t = target_verts[_landmark_anchors[0][_k_s]]
-        else:
-            _anchor_s_t = _anchor_s.copy()
+        _anchor_s_t = _anchor_s.copy()
 
         _dists_s = np.linalg.norm(target_verts - _anchor_s_t, axis=1)
         _local_s = _dists_s <= _RESCALE_RADIUS_M
@@ -1134,11 +1176,7 @@ def transfer_morph_targets(
                 anchored_count, len(_LOWER_FACE_BLENDSHAPES), upper_thresh, n_upper,
             )
 
-    method_name = (
-        "landmark-anchored RBF" if _landmark_anchors is not None
-        else ("barycentric" if use_barycentric else "IDW k=4")
-    )
-    log.info("All 52 morph targets transferred via %s.", method_name)
+    log.info("All 52 morph targets transferred via Wendland C2.")
 
     rigged = trimesh.Trimesh(
         vertices=target_verts.copy(),
@@ -1297,14 +1335,18 @@ def _pou_rbf_single_worker(
     """
     (name, claire_disp, regions, target_verts, face_region_mask,
      claire_neutral, claire_mask, shepard_w,
-     decimated_verts, deci_to_full_idx) = args
+     decimated_verts, deci_to_full_idx, rbf_radius_scale) = args
 
     import logging as _logging
-    from scipy.interpolate import RBFInterpolator
+    from scipy.linalg import lu_factor, lu_solve
     from scipy.spatial import KDTree
 
     _log = _logging.getLogger(__name__)
     t0 = time.time()
+
+    def _wc2(r, eps):
+        t = np.clip(r / eps, 0.0, 1.0)
+        return (1.0 - t) ** 4 * (4.0 * t + 1.0)
 
     N = len(target_verts)
     full_tree = KDTree(claire_neutral)
@@ -1360,6 +1402,17 @@ def _pou_rbf_single_worker(
         cp_pos = claire_neutral[claire_r_idx]
         cp_disp = claire_disp[claire_r_idx]
 
+        # ── Adaptive support radius per region ────────────────────────
+        # Compute radius from inter-center spacing so the kernel always
+        # has meaningful overlap, even after stride-subsampling.
+        base_radius = _WENDLAND_RADIUS_M * rbf_radius_scale
+        if len(cp_pos) >= 2:
+            nn_dists, _ = KDTree(cp_pos).query(cp_pos, k=2)
+            median_spacing = float(np.median(nn_dists[:, 1]))
+            eps = max(base_radius, 3.0 * median_spacing)
+        else:
+            eps = base_radius
+
         # ── Scale regularisation with centre density ──────────────────
         smoothing = _RBF_SMOOTHING_BASE + len(cp_pos) * _RBF_SMOOTHING_PER_CENTER
 
@@ -1376,13 +1429,22 @@ def _pou_rbf_single_worker(
             eval_pos = target_verts[tgt_r_idx]
 
         try:
-            rbf = RBFInterpolator(
-                cp_pos, cp_disp,
-                kernel="thin_plate_spline",
-                degree=1,
-                smoothing=smoothing,
+            # Build the (n_centers x n_centers) kernel matrix
+            r_cc = np.linalg.norm(
+                cp_pos[:, np.newaxis, :] - cp_pos[np.newaxis, :, :], axis=2,
             )
-            r_disp_eval = rbf(eval_pos)
+            Phi = _wc2(r_cc, eps)
+            # Tikhonov regularisation
+            np.fill_diagonal(Phi, Phi.diagonal() + smoothing)
+            lu, piv = lu_factor(Phi)
+            w = lu_solve((lu, piv), cp_disp)  # (n_centers, 3)
+
+            # Evaluate at target positions
+            r_tc = np.linalg.norm(
+                eval_pos[:, np.newaxis, :] - cp_pos[np.newaxis, :, :], axis=2,
+            )
+            K_eval = _wc2(r_tc, eps)
+            r_disp_eval = K_eval @ w  # (n_eval, 3)
         except Exception:
             r_disp = _idw(target_verts[tgt_r_idx])
             target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
@@ -1405,6 +1467,7 @@ def transfer_morph_targets_pou_rbf(
     aligned_head: trimesh.Trimesh,
     alignment_meta: dict | None,
     face_region_mask: np.ndarray,
+    rbf_radius_scale: float = 1.0,
 ) -> tuple[trimesh.Trimesh, dict[str, np.ndarray]]:
     """Partition-of-Unity RBF morph target transfer — no cross-region contamination.
 
@@ -1429,11 +1492,6 @@ def transfer_morph_targets_pou_rbf(
     """
     if claire_neutral_m is None or _claire_deltas_m is None:
         raise RuntimeError(f"Claire blendshape data not loaded from '{BS_SKIN_PATH}'.")
-
-    try:
-        from scipy.interpolate import RBFInterpolator
-    except ImportError as exc:
-        raise ImportError("scipy.interpolate.RBFInterpolator required for POU-RBF.") from exc
 
     target_verts = np.asarray(aligned_head.vertices, dtype=np.float64)
     N = len(target_verts)
@@ -1475,6 +1533,7 @@ def transfer_morph_targets_pou_rbf(
             shepard_w,
             decimated_verts,
             deci_to_full_idx,
+            rbf_radius_scale,
         )
         for name in ARKIT_BLENDSHAPES
     ]

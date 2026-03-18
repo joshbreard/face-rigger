@@ -26,11 +26,11 @@ log = logging.getLogger("face-rigger.controller")
 SCORE_OK: float = 0.7
 MAX_ATTEMPTS: int = 3
 
-# Attempt strategies: (use_pou_rbf, description)
-_STRATEGIES: list[tuple[bool, str]] = [
-    (True,  "POU-RBF + Landmark NICP"),
-    (True,  "POU-RBF (retry)"),
-    (False, "Classic ICP + TPS (conservative fallback)"),
+# Attempt strategies: (use_pou_rbf, rbf_config_or_None, description)
+_STRATEGIES: list[tuple[bool, dict | None, str]] = [
+    (True,  None,                        "POU-RBF + Landmark NICP"),
+    (True,  {"rbf_radius_scale": 2.0},   "POU-RBF (wider radius)"),
+    (False, None,                        "Classic ICP + TPS (conservative fallback)"),
 ]
 
 
@@ -40,6 +40,7 @@ def run_rig_attempt(
     y_front: Optional[float],
     use_pou_rbf: bool,
     extra_landmarks: Optional[dict] = None,
+    rbf_config: Optional[dict] = None,
 ) -> tuple[bytes, dict, dict]:
     """Run a single rig attempt with the given configuration.
 
@@ -94,10 +95,12 @@ def run_rig_attempt(
 
         log.info("Transferring 52 ARKit morph targets...")
         if use_pou_rbf and aligned_lm_result is not None:
+            _rbf_radius_scale = (rbf_config or {}).get("rbf_radius_scale", 1.0)
             rigged_head, blendshapes = transfer_morph_targets_pou_rbf(
                 aligned_head,
                 alignment_meta,
                 aligned_lm_result["face_region_mask"],
+                rbf_radius_scale=_rbf_radius_scale,
             )
         else:
             rigged_head, blendshapes = transfer_morph_targets(aligned_head, alignment_meta)
@@ -152,7 +155,7 @@ def rig_with_retries(
 
     strategies = _STRATEGIES[:max_attempts]
 
-    for attempt_idx, (use_pou_rbf, desc) in enumerate(strategies, start=1):
+    for attempt_idx, (use_pou_rbf, rbf_config, desc) in enumerate(strategies, start=1):
         log.info(
             "=== Rig attempt %d/%d: %s ===",
             attempt_idx, max_attempts, desc,
@@ -165,6 +168,7 @@ def rig_with_retries(
                 y_front=y_front,
                 use_pou_rbf=use_pou_rbf,
                 extra_landmarks=extra_landmarks,
+                rbf_config=rbf_config,
             )
         except Exception as exc:
             log.warning("Attempt %d failed with exception: %s", attempt_idx, exc)

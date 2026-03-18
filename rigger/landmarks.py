@@ -140,8 +140,25 @@ def detect_landmarks(
 
 
 # ---------------------------------------------------------------------------
-# Internal: software rasterizer + MediaPipe runner
+# Internal: cached FaceLandmarker, software rasterizer + MediaPipe runner
 # ---------------------------------------------------------------------------
+
+_cached_landmarker = None
+
+
+def _get_cached_landmarker(mp_python, mp_vision):
+    """Return a cached FaceLandmarker instance, creating it on first call."""
+    global _cached_landmarker
+    if _cached_landmarker is None:
+        opts = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
+            running_mode=mp_vision.RunningMode.IMAGE,
+            num_faces=1,
+        )
+        _cached_landmarker = mp_vision.FaceLandmarker.create_from_options(opts)
+        log.info("FaceLandmarker created and cached.")
+    return _cached_landmarker
+
 
 def _render_and_detect(mesh: trimesh.Trimesh, image_size: int) -> Optional[np.ndarray]:
     """Render *mesh* to a frontal depth-shaded image and run FaceLandmarker.
@@ -182,15 +199,10 @@ def _render_and_detect(mesh: trimesh.Trimesh, image_size: int) -> Optional[np.nd
     img = _rasterize(mesh, verts, np.asarray(mesh.faces, dtype=np.int32), px, py, image_size)
     img_rgb = np.stack([img, img, img], axis=-1)
 
-    opts = mp_vision.FaceLandmarkerOptions(
-        base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
-        running_mode=mp_vision.RunningMode.IMAGE,
-        num_faces=1,
-    )
     mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
     try:
-        with mp_vision.FaceLandmarker.create_from_options(opts) as lmkr:
-            result = lmkr.detect(mp_img)
+        lmkr = _get_cached_landmarker(mp_python, mp_vision)
+        result = lmkr.detect(mp_img)
     except Exception as exc:
         log.warning("FaceLandmarker exception: %s", exc)
         return None
