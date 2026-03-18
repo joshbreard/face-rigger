@@ -38,7 +38,7 @@ def cut_mouth_slit(
     lip_y_lo_frac: float = _LIP_Y_LO_FRAC,
     lip_y_hi_frac: float = _LIP_Y_HI_FRAC,
     lip_z_lo_frac: float = _LIP_Z_LO_FRAC,
-) -> trimesh.Trimesh:
+) -> tuple[trimesh.Trimesh, np.ndarray]:
     """Split the mouth seam into distinct upper and lower lip vertex loops.
 
     Parameters
@@ -55,12 +55,15 @@ def cut_mouth_slit(
 
     Returns
     -------
-    trimesh.Trimesh
-        New mesh with identical geometry and appearance but with seam vertices
-        duplicated so upper and lower lip triangles reference independent
-        vertex loops.  Vertex indices [0 .. N-1] are preserved unchanged so
-        that downstream blendshape arrays remain aligned with the original
-        primitive vertex count.
+    (trimesh.Trimesh, np.ndarray)
+        A tuple of (new_mesh, seam_orig_indices) where new_mesh has seam
+        vertices duplicated so upper and lower lip triangles reference
+        independent vertex loops, and seam_orig_indices is a 1-D int32
+        array of length N_seam containing the original (pre-split) vertex
+        indices that were duplicated as upper-lip copies.  The upper-lip
+        copies occupy indices [N_orig .. N_orig + N_seam - 1] in the
+        returned mesh.  If no seam vertices were found, seam_orig_indices
+        is empty.
     """
     verts = np.array(mesh.vertices, dtype=np.float64)
     faces = np.array(mesh.faces, dtype=np.int32)
@@ -96,7 +99,7 @@ def cut_mouth_slit(
             "Y=[%.4f, %.4f] Z>=[%.4f]; mesh returned unchanged.",
             lip_y_lo, lip_y_hi, lip_z_lo,
         )
-        return mesh
+        return mesh, np.array([], dtype=np.int32)
 
     log.info(
         "cut_mouth_slit: %d candidate lip vertices in lip region.",
@@ -131,7 +134,7 @@ def cut_mouth_slit(
             "(no candidate has adjacent faces on both sides of its Y); "
             "mesh returned unchanged.",
         )
-        return mesh
+        return mesh, np.array([], dtype=np.int32)
 
     n_seam = len(seam_vertices)
     log.info("cut_mouth_slit: %d seam vertices will be split.", n_seam)
@@ -179,4 +182,4 @@ def cut_mouth_slit(
         "cut_mouth_slit: done — %d → %d vertices (%d seam vertices split into upper/lower copies).",
         len(verts), len(new_verts), n_seam,
     )
-    return result
+    return result, seam_arr

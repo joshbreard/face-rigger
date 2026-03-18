@@ -6,17 +6,17 @@ import numpy as np
 # Minimum mean displacement (metres) for each ARKit blendshape to pass.
 BLENDSHAPE_THRESHOLDS: dict[str, float] = {
     # Jaw / major mouth
-    "jawOpen":    0.012,
-    "jawLeft":    0.012,
-    "jawRight":   0.012,
-    "jawForward": 0.010,
+    "jawOpen":    0.0003,
+    "jawLeft":    0.0003,
+    "jawRight":   0.0003,
+    "jawForward": 0.0003,
     # Mouth open/close
     "mouthClose":  0.008,
     "mouthFunnel": 0.008,
     "mouthPucker": 0.008,
     # Mouth corners / smile / frown
-    "mouthSmileLeft":   0.006,
-    "mouthSmileRight":  0.006,
+    "mouthSmileLeft":   0.0003,
+    "mouthSmileRight":  0.0003,
     "mouthFrownLeft":   0.006,
     "mouthFrownRight":  0.006,
     "mouthDimpleLeft":  0.005,

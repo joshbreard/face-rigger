@@ -3,6 +3,6 @@ __pycache__/
 .env
 assets/face_landmarker.task
 venv/
-
-
+corrections/
+*.npz
 tmp/

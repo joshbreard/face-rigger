@@ -40,6 +40,7 @@ def patch_glb_add_morph_targets(
     output_path: Path,
     original_head_name: str | None = None,
     head_vert_indices: "np.ndarray | None" = None,
+    seam_orig_indices: "np.ndarray | None" = None,
 ) -> None:
     """Add 52 ARKit morph targets to the head primitive of the original GLB.
 
@@ -56,6 +57,11 @@ def patch_glb_add_morph_targets(
     head_vert_indices  : for single-merged-mesh GLBs — indices into the full
                          vertex array that belong to the head.  Non-head
                          vertices receive zero displacement.
+    seam_orig_indices  : indices (in head_vert_indices space) of the vertices
+                         that were duplicated by cut_mouth_slit as upper-lip
+                         copies.  Used to extend head_vert_indices so that
+                         the upper-lip copy displacements are written into the
+                         correct positions in the full-mesh output.
     """
     gltf = pygltflib.GLTF2.load_from_bytes(original_glb_bytes)
     orig_binary: bytes = gltf.binary_blob() or b""
@@ -109,6 +115,16 @@ def patch_glb_add_morph_targets(
     n_prim_verts: int = gltf.accessors[head_prim.attributes.POSITION].count
     n_head_bs: int = len(next(iter(blendshapes.values()))) if blendshapes else 0
 
+    # ── Extend head_vert_indices for mouth-slit upper-lip copies ────────────
+    extended_head_vert_indices = head_vert_indices
+    if head_vert_indices is not None and seam_orig_indices is not None and len(seam_orig_indices) > 0:
+        upper_lip_global_indices = head_vert_indices[seam_orig_indices]
+        extended_head_vert_indices = np.concatenate([head_vert_indices, upper_lip_global_indices])
+        log.info(
+            "Extended head_vert_indices with %d upper-lip seam copies: %d → %d.",
+            len(seam_orig_indices), len(head_vert_indices), len(extended_head_vert_indices),
+        )
+
     # ── Append morph-target displacement data after the existing binary blob ──
     extra_chunks: list[bytes] = []
     current_offset: int = len(orig_binary)
@@ -117,11 +133,11 @@ def patch_glb_add_morph_targets(
     for name in ARKIT_BLENDSHAPES:
         raw = np.asarray(blendshapes.get(name, np.zeros((n_head_bs, 3))), dtype=np.float32)
 
-        if head_vert_indices is not None:
+        if extended_head_vert_indices is not None:
             # Single merged mesh: scatter head displacements into full-mesh array
             disp = np.zeros((n_prim_verts, 3), dtype=np.float32)
-            n_copy = min(len(head_vert_indices), n_prim_verts, len(raw))
-            disp[head_vert_indices[:n_copy]] = raw[:n_copy]
+            n_copy = min(len(extended_head_vert_indices), n_prim_verts, len(raw))
+            disp[extended_head_vert_indices[:n_copy]] = raw[:n_copy]
         elif len(raw) != n_prim_verts:
             log.warning(
                 "Morph target '%s': disp len=%d != prim verts=%d; padding.",

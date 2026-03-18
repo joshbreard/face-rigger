@@ -665,12 +665,72 @@ def _transfer_landmark_anchored(
 
 
 # ---------------------------------------------------------------------------
+# Mouth-slit seam correction shape sets
+# ---------------------------------------------------------------------------
+
+# Lower-jaw-driven shapes: zero out upper-lip copy displacement so only the
+# lower (original) seam vertices move with the jaw.
+_SEAM_LOWER_JAW_SHAPES: frozenset[str] = frozenset({
+    "jawOpen", "jawForward", "jawLeft", "jawRight",
+    "mouthLowerDownLeft", "mouthLowerDownRight",
+    "mouthShrugLower", "mouthRollLower",
+    "mouthFunnel", "mouthPucker",
+    "mouthLeft", "mouthRight", "mouthClose",
+})
+
+# Upper-lip-driven shapes: zero out original (lower) seam vertex displacement
+# but keep the upper-lip copy displacement.
+_SEAM_UPPER_LIP_SHAPES: frozenset[str] = frozenset({
+    "mouthUpperUpLeft", "mouthUpperUpRight",
+    "mouthShrugUpper", "mouthRollUpper",
+})
+
+
+def _apply_seam_correction(
+    target_morph_targets: dict[str, np.ndarray],
+    seam_orig_indices: np.ndarray,
+    n_target_verts: int,
+) -> None:
+    """Zero out seam vertex displacement on the wrong lip side, in-place.
+
+    For lower-jaw shapes: zero the upper-lip copies (appended at the end).
+    For upper-lip shapes: zero the original (lower) seam vertices.
+    All other shapes: leave both copies unchanged.
+    """
+    n_seam = len(seam_orig_indices)
+    n_orig = n_target_verts - n_seam
+    upper_copy_slice = slice(n_orig, n_orig + n_seam)
+
+    corrected = 0
+    for name, disp in target_morph_targets.items():
+        if name in _SEAM_LOWER_JAW_SHAPES:
+            disp = disp.copy()
+            disp[upper_copy_slice] = 0.0
+            target_morph_targets[name] = disp
+            corrected += 1
+        elif name in _SEAM_UPPER_LIP_SHAPES:
+            disp = disp.copy()
+            disp[seam_orig_indices] = 0.0
+            target_morph_targets[name] = disp
+            corrected += 1
+
+    log.info(
+        "Seam correction: zeroed lip-side displacement on %d/%d shapes "
+        "(%d lower-jaw, %d upper-lip; %d seam verts, upper copies at [%d:%d]).",
+        corrected, len(target_morph_targets),
+        len(_SEAM_LOWER_JAW_SHAPES), len(_SEAM_UPPER_LIP_SHAPES),
+        n_seam, n_orig, n_orig + n_seam,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def transfer_morph_targets(
     target_mesh: trimesh.Trimesh,
     alignment_meta: dict | None = None,
+    seam_orig_indices: np.ndarray | None = None,
 ) -> tuple[trimesh.Trimesh, dict[str, np.ndarray]]:
     """Transfer ARKit morph targets from Claire's blendshape skin to *target_mesh*.
 
@@ -1233,6 +1293,10 @@ def transfer_morph_targets(
                 anchored_count, len(_LOWER_FACE_BLENDSHAPES), upper_thresh, n_upper,
             )
 
+    # ── Mouth-slit seam correction ──────────────────────────────────────────
+    if seam_orig_indices is not None and len(seam_orig_indices) > 0:
+        _apply_seam_correction(target_morph_targets, seam_orig_indices, len(target_verts))
+
     log.info("All 52 morph targets transferred via Wendland C2.")
 
     rigged = trimesh.Trimesh(
@@ -1517,6 +1581,15 @@ def _pou_rbf_single_worker(
 
         target_disp[tgt_r_idx] += shepard_w[tgt_r_idx, r_idx, np.newaxis] * r_disp
 
+    # If the result is all-zero (e.g. no target verts in any of the shape's
+    # regions), fall back to global IDW so the shape gets some displacement.
+    if np.linalg.norm(target_disp, axis=1).max() < 1e-9:
+        _log.warning(
+            "POU-RBF '%s': all-zero after region loop — falling back to global IDW.",
+            name,
+        )
+        return _idw_full()
+
     return name, target_disp
 
 
@@ -1525,6 +1598,7 @@ def transfer_morph_targets_pou_rbf(
     alignment_meta: dict | None,
     face_region_mask: np.ndarray,
     rbf_radius_scale: float = 1.0,
+    seam_orig_indices: np.ndarray | None = None,
 ) -> tuple[trimesh.Trimesh, dict[str, np.ndarray]]:
     """Partition-of-Unity RBF morph target transfer — no cross-region contamination.
 
@@ -1557,6 +1631,19 @@ def transfer_morph_targets_pou_rbf(
 
     # Full IDW tree for fallbacks
     full_tree = KDTree(claire_neutral_m)
+
+    # Log per-region control point counts for diagnostics
+    _region_names = [
+        "left_eye", "right_eye", "nose", "mouth", "left_brow",
+        "right_brow", "forehead", "left_cheek", "right_cheek", "jaw",
+    ]
+    for r in range(10):
+        n_tgt = int((face_region_mask == r).sum())
+        n_claire = int((claire_mask == r).sum())
+        log.info(
+            "POU-RBF region %d (%s): target=%d verts, Claire=%d control points.",
+            r, _region_names[r], n_tgt, n_claire,
+        )
 
     # Precompute Shepard blending weights: (N, 10)
     shepard_w = _compute_pou_shepard_weights(target_verts, face_region_mask)
@@ -1731,6 +1818,10 @@ def transfer_morph_targets_pou_rbf(
                 anchored += 1
         if anchored:
             log.info("POU-RBF: upper-face anchoring applied to %d shapes.", anchored)
+
+    # ── Mouth-slit seam correction ──────────────────────────────────────────
+    if seam_orig_indices is not None and len(seam_orig_indices) > 0:
+        _apply_seam_correction(target_morph_targets, seam_orig_indices, N)
 
     log.info("All 52 morph targets transferred via POU-RBF.")
     rigged = trimesh.Trimesh(

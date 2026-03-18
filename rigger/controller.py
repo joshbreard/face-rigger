@@ -58,7 +58,8 @@ def run_rig_attempt(
         )
 
         log.info("Cutting mouth slit...")
-        head_mesh = cut_mouth_slit(head_mesh)
+        head_mesh, seam_orig_indices = cut_mouth_slit(head_mesh)
+        scene_meta["seam_orig_indices"] = seam_orig_indices
 
         log.info("Detecting MediaPipe landmarks...")
         lm_result = None
@@ -101,10 +102,14 @@ def run_rig_attempt(
                 alignment_meta,
                 aligned_lm_result["face_region_mask"],
                 rbf_radius_scale=_rbf_radius_scale,
+                seam_orig_indices=seam_orig_indices,
             )
             scene_meta["face_region_mask"] = aligned_lm_result["face_region_mask"]
         else:
-            rigged_head, blendshapes = transfer_morph_targets(aligned_head, alignment_meta)
+            rigged_head, blendshapes = transfer_morph_targets(
+                aligned_head, alignment_meta,
+                seam_orig_indices=seam_orig_indices,
+            )
             scene_meta["face_region_mask"] = None
 
         # Inverse ICP transform: blendshapes back to original model space.
@@ -124,6 +129,7 @@ def run_rig_attempt(
             output_path=output_path,
             original_head_name=scene_meta.get("original_head_name"),
             head_vert_indices=scene_meta.get("head_vert_indices"),
+            seam_orig_indices=scene_meta.get("seam_orig_indices"),
         )
 
         validation_data = score_rig(blendshapes_orig)
