@@ -28,9 +28,13 @@ from rigger.glb_writer import patch_glb_add_morph_targets
 from rigger.landmarks import detect_landmarks
 from rigger.mouth_slit import cut_mouth_slit
 from rigger.separator import _find_jaw_cutoff_geometric, separate_head_body
+import pygltflib
+
 from rigger.transfer import (
     ARKIT_BLENDSHAPES,
     BS_SKIN_PATH,
+    REGION_BLENDSHAPES,
+    _BLENDSHAPE_REGIONS,
     _claire_deltas_m,
     claire_neutral_m,
     transfer_morph_targets,
@@ -111,6 +115,24 @@ async def index() -> HTMLResponse:
     return HTMLResponse(content=Path("static/index.html").read_text())
 
 
+def _glb_has_arkit_morphs(glb_path: Path) -> bool:
+    """Check if a GLB file already contains the 52 ARKit morph target names."""
+    try:
+        gltf = pygltflib.GLTF2().load(str(glb_path))
+        arkit_set = set(ARKIT_BLENDSHAPES)
+        for mesh in gltf.meshes:
+            names = (mesh.extras or {}).get("targetNames", [])
+            if names and arkit_set.issubset(set(names)):
+                return True
+            for prim in mesh.primitives:
+                names = (prim.extras or {}).get("targetNames", [])
+                if names and arkit_set.issubset(set(names)):
+                    return True
+    except Exception as exc:
+        log.debug("Morph target check failed: %s", exc)
+    return False
+
+
 @app.post("/preview")
 async def preview(file: UploadFile = File(...)) -> JSONResponse:
     """Save upload to a temp file, run geometric neck detection, return plane params."""
@@ -124,6 +146,9 @@ async def preview(file: UploadFile = File(...)) -> JSONResponse:
 
     # Schedule automatic cleanup after 10 minutes.
     asyncio.get_event_loop().create_task(_delete_after_delay(tmp_path, 600.0))
+
+    # Check if the GLB already has ARKit morph targets.
+    has_arkit = _glb_has_arkit_morphs(tmp_path)
 
     try:
         import trimesh as _trimesh
@@ -158,10 +183,13 @@ async def preview(file: UploadFile = File(...)) -> JSONResponse:
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    log.info(
-        "Preview: temp_id=%s  y_back=%.4f  y_front=%.4f  z=[%.4f, %.4f]",
-        temp_id, y_back, y_front, z_min, z_max,
-    )
+    if has_arkit:
+        log.info("Preview: temp_id=%s — GLB already has 52 ARKit morphs, skipping rig.", temp_id)
+    else:
+        log.info(
+            "Preview: temp_id=%s  y_back=%.4f  y_front=%.4f  z=[%.4f, %.4f]",
+            temp_id, y_back, y_front, z_min, z_max,
+        )
     return JSONResponse({
         "temp_id": temp_id,
         "y_front": round(y_front, 5),
@@ -170,6 +198,7 @@ async def preview(file: UploadFile = File(...)) -> JSONResponse:
         "y_max":   round(y_max,   5),
         "z_min":   round(z_min,   5),
         "z_max":   round(z_max,   5),
+        "has_arkit_morphs": has_arkit,
     })
 
 
@@ -284,7 +313,7 @@ async def rig(
     log.info("Read %d bytes.", len(glb_bytes))
 
     def _run_pipeline() -> tuple:
-        best_glb, validation_data, attempt_idx, needs_human = rig_with_retries(
+        best_glb, validation_data, attempt_idx, needs_human, scene_meta = rig_with_retries(
             glb_bytes=glb_bytes,
             y_back=y_back,
             y_front=y_front,
@@ -311,6 +340,16 @@ async def rig(
         }
         validate_path.write_text(json.dumps(validate_meta))
 
+        # Persist region mask for region-based correction editor.
+        if scene_meta and scene_meta.get("face_region_mask") is not None:
+            head_vert_indices = scene_meta.get("head_vert_indices", [])
+            face_region_mask = scene_meta["face_region_mask"]
+            n_map = min(len(head_vert_indices), len(face_region_mask))
+            indices = np.array(head_vert_indices[:n_map], dtype=np.int32)
+            labels = np.asarray(face_region_mask[:n_map], dtype=np.int32)
+            regions_path = TMP_DIR / f"{rig_id}.regions.npz"
+            np.savez_compressed(str(regions_path), indices=indices, labels=labels)
+
         return validation_data, rig_id, attempt_idx, needs_human
 
     async with rig_semaphore:
@@ -324,7 +363,7 @@ async def rig(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Schedule cleanup of all rig files.
-    for suffix in (".glb", ".orig.glb", ".validate.json", ".hints.json"):
+    for suffix in (".glb", ".orig.glb", ".validate.json", ".hints.json", ".regions.npz"):
         p = TMP_DIR / f"{rig_id}{suffix}"
         asyncio.get_event_loop().create_task(_delete_after_delay(p, 600.0))
 
@@ -422,7 +461,7 @@ async def rig_retry(rig_id: str):
         raise HTTPException(status_code=503, detail="Claire blendshape skin not loaded.")
 
     def _run_retry() -> tuple:
-        best_glb, validation_data, attempt_idx, needs_human = rig_with_retries(
+        best_glb, validation_data, attempt_idx, needs_human, scene_meta = rig_with_retries(
             glb_bytes=glb_bytes,
             y_back=y_back,
             y_front=y_front,
@@ -441,6 +480,17 @@ async def rig_retry(rig_id: str):
             "needs_human": False,
         }
         validate_path.write_text(json.dumps(new_meta))
+
+        # Persist region mask for region-based correction editor.
+        if scene_meta and scene_meta.get("face_region_mask") is not None:
+            head_vert_indices = scene_meta.get("head_vert_indices", [])
+            face_region_mask = scene_meta["face_region_mask"]
+            n_map = min(len(head_vert_indices), len(face_region_mask))
+            indices = np.array(head_vert_indices[:n_map], dtype=np.int32)
+            labels = np.asarray(face_region_mask[:n_map], dtype=np.int32)
+            regions_path = TMP_DIR / f"{rig_id}.regions.npz"
+            np.savez_compressed(str(regions_path), indices=indices, labels=labels)
+
         log.info("Retry complete: rig_id=%s score=%.2f needs_human=%s", rig_id, validation_data["overall_score"], needs_human)
 
         return validation_data, attempt_idx, needs_human
@@ -475,6 +525,56 @@ async def rig_retry(rig_id: str):
             "Access-Control-Expose-Headers": expose,
         },
     )
+
+
+REGION_LABELS = [
+    "left_eye", "right_eye", "nose", "mouth", "left_brow",
+    "right_brow", "forehead", "left_cheek", "right_cheek", "jaw",
+]
+REGION_MIRROR = {0: 1, 1: 0, 4: 5, 5: 4, 7: 8, 8: 7}
+
+
+@app.get("/region-vertices/{rig_id}")
+async def region_vertices(rig_id: str, blendshape: str = "") -> JSONResponse:
+    """Return region vertex indices and metadata for a given blendshape."""
+    if not re.match(r"^[0-9a-f\-]+$", rig_id):
+        raise HTTPException(status_code=400, detail="Invalid rig_id.")
+    if not blendshape:
+        raise HTTPException(status_code=400, detail="blendshape query param required.")
+
+    regions_path = TMP_DIR / f"{rig_id}.regions.npz"
+    if not regions_path.exists():
+        raise HTTPException(status_code=404, detail="Region data not found.")
+
+    data = np.load(str(regions_path))
+    indices = data["indices"]
+    labels = data["labels"]
+
+    # Look up primary region for this blendshape.
+    region_list = _BLENDSHAPE_REGIONS.get(blendshape, list(range(10)))
+    primary_region = region_list[0]
+
+    # Find affected vertex indices.
+    mask = labels == primary_region
+    affected = indices[mask].tolist()
+
+    # Derive mirror blendshape via Left ↔ Right swap.
+    mirror_bs = None
+    if "Left" in blendshape:
+        mirror_bs = blendshape.replace("Left", "Right")
+    elif "Right" in blendshape:
+        mirror_bs = blendshape.replace("Right", "Left")
+    mirror_region = REGION_MIRROR.get(primary_region)
+
+    return JSONResponse({
+        "affected_vertex_indices": affected,
+        "region_index": int(primary_region),
+        "region_label": REGION_LABELS[primary_region],
+        "mirror_blendshape": mirror_bs,
+        "mirror_region": int(mirror_region) if mirror_region is not None else None,
+        "all_indices": indices.tolist(),
+        "all_labels": labels.tolist(),
+    })
 
 
 @app.post("/save-correction")
@@ -515,14 +615,17 @@ async def save_correction(request: Request):
     filename = f"{rig_id}_{bs_name}_{sample_id}.npz"
     filepath = corrections_dir / filename
 
-    np.savez_compressed(
-        str(filepath),
+    updated_vertex_indices = header.get("updated_vertex_indices")
+    save_kwargs = dict(
         neutral=neutral,
         auto_deltas=auto_deltas,
         corrected_deltas=corrected_deltas,
         blendshape_name=np.array(bs_name),
         rig_id=np.array(rig_id),
     )
+    if updated_vertex_indices is not None:
+        save_kwargs["updated_vertex_indices"] = np.array(updated_vertex_indices, dtype=np.int32)
+    np.savez_compressed(str(filepath), **save_kwargs)
 
     log.info("Saved correction: %s  (%d vertices, blendshape=%s)", filename, vertex_count, bs_name)
     return JSONResponse({"status": "ok", "file": filename, "vertex_count": vertex_count})

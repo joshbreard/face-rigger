@@ -102,8 +102,10 @@ def run_rig_attempt(
                 aligned_lm_result["face_region_mask"],
                 rbf_radius_scale=_rbf_radius_scale,
             )
+            scene_meta["face_region_mask"] = aligned_lm_result["face_region_mask"]
         else:
             rigged_head, blendshapes = transfer_morph_targets(aligned_head, alignment_meta)
+            scene_meta["face_region_mask"] = None
 
         # Inverse ICP transform: blendshapes back to original model space.
         _scale = float(alignment_meta["scale_factor"])
@@ -152,6 +154,7 @@ def rig_with_retries(
     best_score: float = -1.0
     best_crit: int = 999
     best_idx: int = 1
+    best_meta: Optional[dict] = None
 
     strategies = _STRATEGIES[:max_attempts]
 
@@ -162,7 +165,7 @@ def rig_with_retries(
         )
 
         try:
-            glb_out, vd, _ = run_rig_attempt(
+            glb_out, vd, meta = run_rig_attempt(
                 glb_bytes=glb_bytes,
                 y_back=y_back,
                 y_front=y_front,
@@ -184,6 +187,7 @@ def rig_with_retries(
             best_score = score
             best_crit = crit
             best_idx = attempt_idx
+            best_meta = meta
 
         log.info(
             "Attempt %d result: score=%.2f critical=%d (best so far: attempt %d score=%.2f)",
@@ -193,7 +197,7 @@ def rig_with_retries(
         # Early exit if good enough.
         if score >= SCORE_OK:
             log.info("Score %.2f >= threshold %.2f — accepting attempt %d.", score, SCORE_OK, attempt_idx)
-            return best_glb, best_vd, best_idx, False
+            return best_glb, best_vd, best_idx, False, best_meta
 
     if best_glb is None:
         raise RuntimeError("All rig attempts failed.")
@@ -204,7 +208,7 @@ def rig_with_retries(
             "All %d attempts below threshold (best=%.2f < %.2f) — needs human guidance.",
             max_attempts, best_score, SCORE_OK,
         )
-    return best_glb, best_vd, best_idx, needs_human
+    return best_glb, best_vd, best_idx, needs_human, best_meta
 
 
 # ── Landmark merging helpers ──────────────────────────────────────────────
